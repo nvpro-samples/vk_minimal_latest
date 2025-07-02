@@ -1040,14 +1040,17 @@ public:
   Swapchain() = default;
   ~Swapchain() { assert(m_swapChain == VK_NULL_HANDLE && "Missing deinit()"); }
 
-  void        needToRebuild() { m_needRebuild = true; }
+  void        requestRebuild() { m_needRebuild = true; }
   bool        needRebuilding() const { return m_needRebuild; }
-  VkImage     getNextImage() const { return m_nextImages[m_nextImageIndex].image; }
-  VkImageView getNextImageView() const { return m_nextImages[m_nextImageIndex].imageView; }
+  VkImage     getImage() const { return m_nextImages[m_frameImageIndex].image; }
+  VkImageView getImageView() const { return m_nextImages[m_frameImageIndex].imageView; }
   VkFormat    getImageFormat() const { return m_imageFormat; }
   uint32_t    getMaxFramesInFlight() const { return m_maxFramesInFlight; }
-  VkSemaphore getWaitSemaphores() const { return m_frameResources[m_currentFrame].imageAvailableSemaphore; }
-  VkSemaphore getSignalSemaphores() const { return m_frameResources[m_nextImageIndex].renderFinishedSemaphore; }
+  VkSemaphore getImageAvailableSemaphore() const
+  {
+    return m_frameResources[m_frameResourceIndex].imageAvailableSemaphore;
+  }
+  VkSemaphore getRenderFinishedSemaphore() const { return m_frameResources[m_frameImageIndex].renderFinishedSemaphore; }
 
   // Initialize the swapchain with the provided context and surface, then we can create and re-create it
   void init(VkPhysicalDevice physicalDevice, VkDevice device, const QueueInfo& queue, VkSurfaceKHR surface, VkCommandPool cmdPool)
@@ -1196,8 +1199,8 @@ public:
     // Wait for all frames to finish rendering before recreating the swapchain
     vkQueueWaitIdle(m_queue.queue);
 
-    m_currentFrame = 0;
-    m_needRebuild  = false;
+    m_frameResourceIndex = 0;
+    m_needRebuild        = false;
     deinitResources();
     return initResources(vSync);
   }
@@ -1229,11 +1232,11 @@ public:
   {
     ASSERT(m_needRebuild == false, "Swapbuffer need to call reinitResources()");
 
-    auto& frame = m_frameResources[m_currentFrame];
+    auto& frame = m_frameResources[m_frameResourceIndex];
 
     // Acquire the next image from the swapchain
     const VkResult result = vkAcquireNextImageKHR(device, m_swapChain, std::numeric_limits<uint64_t>::max(),
-                                                  frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_nextImageIndex);
+                                                  frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_frameImageIndex);
     // Handle special case if the swapchain is out of date (e.g., window resize)
     if(result == VK_ERROR_OUT_OF_DATE_KHR)
     {
@@ -1253,7 +1256,7 @@ public:
   -*/
   void presentFrame(VkQueue queue)
   {
-    auto& frame = m_frameResources[m_nextImageIndex];
+    auto& frame = m_frameResources[m_frameImageIndex];
 
     // Setup the presentation info, linking the swapchain and the image index
     const VkPresentInfoKHR presentInfo{
@@ -1262,7 +1265,7 @@ public:
         .pWaitSemaphores    = &frame.renderFinishedSemaphore,  // Synchronize presentation
         .swapchainCount     = 1,                               // Swapchain to present the image
         .pSwapchains        = &m_swapChain,                    // Pointer to the swapchain
-        .pImageIndices      = &m_nextImageIndex,               // Index of the image to present
+        .pImageIndices      = &m_frameImageIndex,              // Index of the image to present
     };
 
     // Present the image and handle potential resizing issues
@@ -1278,7 +1281,7 @@ public:
     }
 
     // Advance to the next frame in the swapchain
-    m_currentFrame = (m_currentFrame + 1) % m_maxFramesInFlight;
+    m_frameResourceIndex = (m_frameResourceIndex + 1) % m_maxFramesInFlight;
   }
 
 private:
@@ -1378,9 +1381,9 @@ private:
 
   std::vector<Image>          m_nextImages{};
   std::vector<FrameResources> m_frameResources{};
-  uint32_t                    m_currentFrame   = 0;
-  uint32_t                    m_nextImageIndex = 0;
-  bool                        m_needRebuild    = false;
+  uint32_t                    m_frameResourceIndex = 0;
+  uint32_t                    m_frameImageIndex    = 0;
+  bool                        m_needRebuild        = false;
 
   uint32_t m_maxFramesInFlight = 3;  // Best for pretty much all cases
 };
@@ -2081,7 +2084,7 @@ public:
         if(ImGui::BeginMenu("File"))
         {
           if(ImGui::MenuItem("vSync", "", &m_vSync))
-            m_swapchain.needToRebuild();  // Recreate the swapchain with the new vSync setting
+            m_swapchain.requestRebuild();  // Recreate the swapchain with the new vSync setting
           ImGui::Separator();
           if(ImGui::MenuItem("Exit"))
             glfwSetWindowShouldClose(m_window, true);
@@ -2476,12 +2479,11 @@ private:
     auto& frame = m_frameData[m_frameRingCurrent];
 
     // Wait until GPU has finished processing the frame that was using these resources previously (numFramesInFlight frames ago)
-    const uint64_t            waitValue = frame.frameNumber;
-    const VkSemaphoreWaitInfo waitInfo  = {
-         .sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-         .semaphoreCount = 1,
-         .pSemaphores    = &m_frameTimelineSemaphore,
-         .pValues        = &waitValue,
+    const VkSemaphoreWaitInfo waitInfo = {
+        .sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .semaphoreCount = 1,
+        .pSemaphores    = &m_frameTimelineSemaphore,
+        .pValues        = &m_frameData[m_frameRingCurrent].frameNumber,
     };
     vkWaitSemaphores(device, &waitInfo, std::numeric_limits<uint64_t>::max());
 
@@ -2524,12 +2526,12 @@ private:
     std::vector<VkSemaphoreSubmitInfo> signalSemaphores;
     waitSemaphores.push_back({
         .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-        .semaphore = m_swapchain.getWaitSemaphores(),
+        .semaphore = m_swapchain.getImageAvailableSemaphore(),
         .stageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
     });
     signalSemaphores.push_back({
         .sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-        .semaphore = m_swapchain.getSignalSemaphores(),
+        .semaphore = m_swapchain.getRenderFinishedSemaphore(),
         .stageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
     });
 
@@ -2609,7 +2611,7 @@ private:
     // Image to render to
     const std::array<VkRenderingAttachmentInfoKHR, 1> colorAttachment{{{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
-        .imageView   = m_swapchain.getNextImageView(),
+        .imageView   = m_swapchain.getImageView(),
         .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,   // Clear the image (see clearValue)
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,  // Store the image (keep the image)
@@ -2626,7 +2628,7 @@ private:
     };
 
     // Transition the swapchain image to the color attachment layout, needed when using dynamic rendering
-    utils::cmdTransitionImageLayout(cmd, m_swapchain.getNextImage(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    utils::cmdTransitionImageLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     vkCmdBeginRendering(cmd, &renderingInfo);
@@ -2641,7 +2643,7 @@ private:
     vkCmdEndRendering(cmd);
 
     // Transition the swapchain image back to the present layout
-    utils::cmdTransitionImageLayout(cmd, m_swapchain.getNextImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    utils::cmdTransitionImageLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
   }
 
