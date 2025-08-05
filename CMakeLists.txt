@@ -5,24 +5,22 @@ project(${MYPROJ} VERSION 1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Download CPM.cmake
-set(CPM_DOWNLOAD_VERSION 0.40.2)
-set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-if(NOT (EXISTS ${CPM_DOWNLOAD_LOCATION}))
-    message(STATUS "Downloading CPM.cmake...")
-    file(DOWNLOAD https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake ${CPM_DOWNLOAD_LOCATION})
-endif()
-include(${CPM_DOWNLOAD_LOCATION})
+# Use FetchContent for faster dependency management
+include(FetchContent)
 
 # Find Vulkan
 find_package(Vulkan REQUIRED)
-if(NOT Vulkan_SLANGC_EXECUTABLE)
-    get_filename_component(_Vulkan_LIB_DIR ${Vulkan_LIBRARY} DIRECTORY)
-    find_program(Vulkan_SLANGC_EXECUTABLE
-        NAMES slangc
-        HINTS ${_Vulkan_LIB_DIR}/../Bin
-    )
-endif()
+
+# Add cmake modules directory to module path
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+# Include shader compilation functions
+include(CompilerSlangShader)
+include(CompilerGlslShader)
+include(DownloadPackage)
+
+# Find or download Slang compiler
+find_package(Slang REQUIRED)
 
 # Add the executable
 add_executable(${MYPROJ} 
@@ -40,53 +38,65 @@ if(MSVC)
 endif()
 
 # Include GLFW
-CPMAddPackage(
-  NAME glfw
-  GITHUB_REPOSITORY glfw/glfw
+message(STATUS "Fetching GLFW...")
+FetchContent_Declare(
+  glfw
+  GIT_REPOSITORY https://github.com/glfw/glfw.git
   GIT_TAG 3.4
-  OPTIONS
-    "GLFW_BUILD_DOCS OFF"
-    "GLFW_BUILD_EXAMPLES OFF"
-    "GLFW_BUILD_TESTS OFF"
-    "GLFW_BUILD_WAYLAND OFF"
-    "GLFW_INSTALL OFF"
 )
+set(GLFW_BUILD_DOCS OFF)
+set(GLFW_BUILD_EXAMPLES OFF)
+set(GLFW_BUILD_TESTS OFF)
+set(GLFW_BUILD_WAYLAND OFF)
+set(GLFW_INSTALL OFF)
+FetchContent_MakeAvailable(glfw)
+message(STATUS "GLFW ready at: ${glfw_SOURCE_DIR}")
 
 # Include GLM
-CPMAddPackage(
-  NAME glm
-  GITHUB_REPOSITORY g-truc/glm
+message(STATUS "Fetching GLM...")
+FetchContent_Declare(
+  glm
+  GIT_REPOSITORY https://github.com/g-truc/glm.git
   GIT_TAG master
 )
+FetchContent_MakeAvailable(glm)
+message(STATUS "GLM ready at: ${glm_SOURCE_DIR}")
 set_property(TARGET glm PROPERTY FOLDER "ThirdParty")
 
 # Include Volk
-CPMAddPackage(
-  NAME volk
-  GITHUB_REPOSITORY zeux/volk
-  GIT_TAG 1.4.304
+message(STATUS "Fetching Volk...")
+FetchContent_Declare(
+  volk
+  GIT_REPOSITORY https://github.com/zeux/volk.git
+  GIT_TAG master
 )
+FetchContent_MakeAvailable(volk)
+message(STATUS "Volk ready at: ${volk_SOURCE_DIR}")
 set_property(TARGET volk PROPERTY FOLDER "ThirdParty")
 
 # Include VMA
-CPMAddPackage(
-  NAME VulkanMemoryAllocator
-  GITHUB_REPOSITORY GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+message(STATUS "Fetching VulkanMemoryAllocator...")
+FetchContent_Declare(
+  VulkanMemoryAllocator
+  GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
   GIT_TAG master
-  DOWNLOAD_ONLY
 )
-set(VMA_SOURCE ${VulkanMemoryAllocator_SOURCE_DIR}/include/vk_mem_alloc.h)
-target_include_directories(${MYPROJ} PRIVATE ${VulkanMemoryAllocator_SOURCE_DIR}/include)
+FetchContent_MakeAvailable(VulkanMemoryAllocator)
+message(STATUS "VulkanMemoryAllocator ready at: ${vulkanmemoryallocator_SOURCE_DIR}")
+set(VMA_SOURCE ${vulkanmemoryallocator_SOURCE_DIR}/include/vk_mem_alloc.h)
+target_include_directories(${MYPROJ} PRIVATE ${vulkanmemoryallocator_SOURCE_DIR}/include)
 target_sources(${MYPROJ} PRIVATE ${VMA_SOURCE})
 source_group("vma" FILES ${VMA_SOURCE})
 
-#include ImGui
-CPMAddPackage(
-  NAME imgui
-  GITHUB_REPOSITORY ocornut/imgui
+# Include ImGui
+message(STATUS "Fetching ImGui (docking branch)...")
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
   GIT_TAG docking
-  DOWNLOAD_ONLY
 )
+FetchContent_MakeAvailable(imgui)
+message(STATUS "ImGui ready at: ${imgui_SOURCE_DIR}")
 set(IMGUI_SOURCES 
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui.h
@@ -133,88 +143,35 @@ target_compile_definitions(${MYPROJ} PRIVATE VK_NO_PROTOTYPES)
 
 
 #------------------------------------------------------------------------------------------------------------------------------
-# Compile GLSL shaders
-file(GLOB SHADER_FILES "shaders/*.glsl")
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/_autogen)
-foreach(SHADER ${SHADER_FILES})
-  get_filename_component(SHADER_NAME ${SHADER} NAME)
-  string(REPLACE "." "_" VN_SHADER_NAME ${SHADER_NAME})
-  set(OUTPUT_FILE "${CMAKE_BINARY_DIR}/_autogen/${SHADER_NAME}.h")
-  set(_COMMAND ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE} -g -D_glsl --target-env vulkan1.3 --vn ${VN_SHADER_NAME} -o ${OUTPUT_FILE} ${SHADER})
-  add_custom_command(
-    OUTPUT ${OUTPUT_FILE}
-    COMMAND ${_COMMAND}
-    # COMMENT  "${_COMMAND}"
-    MAIN_DEPENDENCY ${SHADER}
-    COMMENT "Compiling GLSL shader ${SHADER_NAME}"
-    VERBATIM
-  )
-  list(APPEND SHADER_HEADERS ${OUTPUT_FILE})
-endforeach()
+# Compile shaders
+file(GLOB SHADER_SLANG_FILES "shaders/*.slang")
+file(GLOB SHADER_GLSL_FILES "shaders/*.glsl")
+file(GLOB SHADER_H_FILES "shaders/*.h")
 
-#------------------------------------------------------------------------------------------------------------------------------
-# Find Slang compiler
-if( Vulkan_SLANGC_EXECUTABLE)
-    # Initialize variables
-    set(USE_GLSL OFF )
-    set(USE_SLANG OFF)
-    # Define the available choices for shader languages
-    set(CHOICES "GLSL" "SLANG")
-    set(USE_SHADER_LANGUAGE "SLANG" CACHE STRING "Choose the shading language to use.") # Shader language to use by default
-    set_property(CACHE USE_SHADER_LANGUAGE PROPERTY STRINGS ${CHOICES}) # Provide the choices to the user in the CMake GUI
-    if(USE_SHADER_LANGUAGE STREQUAL "SLANG")
-        target_compile_definitions(${MYPROJ} PRIVATE USE_SLANG)
-    endif()
+set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_LIST_DIR}/_autogen")
 
+compile_slang(
+  "${SHADER_SLANG_FILES}"
+  "${SHADER_OUTPUT_DIR}"
+  GENERATED_SHADER_SLANG_HEADERS
+  EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
+)
 
-    set(_SLANG_FLAGS
-        -profile sm_6_6+spirv_1_6
-        -capability spvInt64Atomics+spvShaderInvocationReorderNV+spvShaderClockKHR+spvRayTracingMotionBlurNV
-        -target spirv
-        -emit-spirv-directly
-        -force-glsl-scalar-layout
-        -fvk-use-entrypoint-name
-        -g3  # Enable debug information
-        -O0  # Disable optimization (spirv-opt)
-        -source-embed-style text     
-    )
-
-    # Compile Slang shaders using slangc
-    file(GLOB SHADER_SLANG_FILES "shaders/*.slang")
-    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/_autogen)
-    foreach(SHADER ${SHADER_SLANG_FILES})
-      get_filename_component(SHADER_NAME ${SHADER} NAME)
-      string(REPLACE "." "_" VN_SHADER_NAME ${SHADER_NAME})
-      set(OUTPUT_FILE "${CMAKE_BINARY_DIR}/_autogen/${SHADER_NAME}.h")
-      set(_COMMAND ${Vulkan_SLANGC_EXECUTABLE} 
-        ${_SLANG_FLAGS} 
-        -source-embed-name ${VN_SHADER_NAME}
-        -o ${OUTPUT_FILE} ${SHADER})
-      
-      add_custom_command(
-        OUTPUT ${OUTPUT_FILE}
-        COMMAND ${_COMMAND}
-        MAIN_DEPENDENCY ${SHADER}
-        COMMENT "Compiling Slang shader ${SHADER_NAME} with slangc"
-        VERBATIM
-      )
-      list(APPEND SHADER_HEADERS ${OUTPUT_FILE})
-    endforeach()
-
-
-else()
-    message(ERROR "slangc executable not found")
-endif()
-
+compile_glsl(
+  "${SHADER_GLSL_FILES}"
+  "${SHADER_OUTPUT_DIR}"
+  GENERATED_SHADER_GLSL_HEADERS
+  EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
+)
 
 
 # Add shader files to the project
-file(GLOB SHADER_H_FILES "shaders/*.h")
-source_group("Shaders" FILES ${SHADER_FILES} ${SHADER_SLANG_FILES} ${SHADER_H_FILES})
-target_sources(${MYPROJ} PRIVATE ${SHADER_FILES} ${SHADER_H_FILES})
+source_group("Shaders" FILES ${SHADER_SLANG_FILES} ${SHADER_GLSL_FILES} ${SHADER_H_FILES})
+source_group("Shaders/Compiled" FILES ${GENERATED_SHADER_SLANG_HEADERS} ${GENERATED_SHADER_GLSL_HEADERS})
 
-# Add the shader headers directly to the executable target
-target_sources(${MYPROJ} PRIVATE ${SHADER_HEADERS})
+# Add the output shader headers (target) directly to the executable
+# This allows to compile the shaders when the executable is built
+target_sources(${MYPROJ} PRIVATE ${GENERATED_SHADER_SLANG_HEADERS} ${GENERATED_SHADER_GLSL_HEADERS} ${SHADER_H_FILES})
 
 
 # Include the shader and _autogen directory

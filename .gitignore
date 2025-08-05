@@ -2,4 +2,4 @@ build/
 cmake_build_linux/
 _install/
 .vscode/
-
+_autogen/
