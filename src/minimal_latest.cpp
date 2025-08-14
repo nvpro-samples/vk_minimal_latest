@@ -2276,6 +2276,7 @@ private:
     vkDestroyDescriptorSetLayout(device, m_textureDescriptorSetLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, m_graphicDescriptorSetLayout, nullptr);
     vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
+    vkDestroyDescriptorPool(device, m_uiDescriptorPool, nullptr);
 
     // Frame info
     for(size_t i = 0; i < m_frameData.size(); i++)
@@ -3058,7 +3059,7 @@ private:
               .Device                      = m_context.getDevice(),
               .QueueFamily                 = m_context.getGraphicsQueue().familyIndex,
               .Queue                       = m_context.getGraphicsQueue().queue,
-              .DescriptorPool              = m_descriptorPool,
+              .DescriptorPool              = m_uiDescriptorPool,
               .MinImageCount               = 2,
               .ImageCount                  = m_swapchain.getMaxFramesInFlight(),
               .UseDynamicRendering         = true,
@@ -3077,32 +3078,51 @@ private:
 
   /*--
    * The Descriptor Pool is used to allocate descriptor sets.
-   * Currently, only ImGui requires a combined image sampler.
+   * There are two descriptor pools in this application:
+   * - One for the application texture descriptor sets (large arrays)
+   * - One for ImGui font textures and GBuffer textures for ImGui display
   -*/
   void createDescriptorPool()
   {
     VkPhysicalDeviceProperties deviceProperties;
     vkGetPhysicalDeviceProperties(m_context.getPhysicalDevice(), &deviceProperties);
 
-    // We don't need to set the exact number of descriptor sets, but we need to set a maximum
-    const uint32_t safegardSize = 2;
-    uint32_t maxDescriptorSets = std::min(1000U, deviceProperties.limits.maxDescriptorSetUniformBuffers - safegardSize);
-    m_maxTextures = std::min(m_maxTextures, deviceProperties.limits.maxDescriptorSetSampledImages - safegardSize);
+    // This is the descriptor pool for the application textures, which is used in shaders
+    {
+      m_maxTextures                 = std::min(m_maxTextures, deviceProperties.limits.maxDescriptorSetSampledImages);
+      VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_maxTextures};
+      uint32_t             maxDescriptorSets    = std::min(20U, deviceProperties.limits.maxDescriptorSetUniformBuffers);
+      const VkDescriptorPoolCreateInfo poolInfo = {
+          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+          .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  //  allows descriptor sets to be updated after they have been bound to a command buffer
+                   VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // individual descriptor sets can be freed from the descriptor pool
+          .maxSets = maxDescriptorSets,  // We only need one descriptor set for the textures, but it can be larger and adjusted to the number of sets
+          .poolSizeCount = 1,
+          .pPoolSizes    = &poolSize,
+      };
+      VK_CHECK(vkCreateDescriptorPool(m_context.getDevice(), &poolInfo, nullptr, &m_descriptorPool));
+      DBG_VK_NAME(m_descriptorPool);
+      LOGI("Created application descriptor pool: %u textures, %u sets", m_maxTextures, maxDescriptorSets);
+    }
 
-    const std::array<VkDescriptorPoolSize, 1> poolSizes{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_maxTextures},
-    };
+    // This is the descriptor pool for the ImGui UI, which is used to display the textures and other resources (GBuffers).
+    {
+      // ImGui creates a descriptor set for each single texture. Therefore the pool size must be large enough to hold all textures of all sets.
+      uint32_t uiPoolSize        = std::min(20U, deviceProperties.limits.maxDescriptorSetSampledImages);
+      uint32_t maxDescriptorSets = std::min(uiPoolSize, deviceProperties.limits.maxDescriptorSetUniformBuffers);
+      VkDescriptorPoolSize       poolSize = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, uiPoolSize};
+      VkDescriptorPoolCreateInfo poolInfo = {
+          .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+          .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+          .maxSets       = maxDescriptorSets,
+          .poolSizeCount = 1,
+          .pPoolSizes    = &poolSize,
+      };
 
-    const VkDescriptorPoolCreateInfo poolInfo = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT |  //  allows descriptor sets to be updated after they have been bound to a command buffer
-                 VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,  // individual descriptor sets can be freed from the descriptor pool
-        .maxSets       = maxDescriptorSets,  // Allowing to create many sets (ImGui uses this for textures)
-        .poolSizeCount = uint32_t(poolSizes.size()),
-        .pPoolSizes    = poolSizes.data(),
-    };
-    VK_CHECK(vkCreateDescriptorPool(m_context.getDevice(), &poolInfo, nullptr, &m_descriptorPool));
-    DBG_VK_NAME(m_descriptorPool);
+      VK_CHECK(vkCreateDescriptorPool(m_context.getDevice(), &poolInfo, nullptr, &m_uiDescriptorPool));
+      DBG_VK_NAME(m_uiDescriptorPool);
+      LOGI("Created UI descriptor pool: %u textures, %u sets", uiPoolSize, maxDescriptorSets);
+    }
   }
 
   /*--
@@ -3357,7 +3377,8 @@ private:
   VkPipeline            m_graphicsPipelineWithTexture{};     // The graphics pipeline with texture
   VkPipeline            m_graphicsPipelineWithoutTexture{};  // The graphics pipeline without texture
   VkCommandPool         m_transientCmdPool{};                // The command pool
-  VkDescriptorPool      m_descriptorPool{};                  // Application descriptor pool
+  VkDescriptorPool      m_descriptorPool{};                  // Texture/shader descriptor pool
+  VkDescriptorPool      m_uiDescriptorPool{};                // Ui descriptor pool
   VkDescriptorSetLayout m_textureDescriptorSetLayout{};      // Descriptor set layout for all textures (set 0)
   VkDescriptorSetLayout m_graphicDescriptorSetLayout{};      // Descriptor set layout for the scene info (set 1)
   VkDescriptorSet       m_textureDescriptorSet{};            // Application descriptor set (storing all textures)
