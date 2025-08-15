@@ -2108,7 +2108,24 @@ public:
       }
 
       // ImGui::ShowDemoWindow();
-      drawFrame();
+
+      // Frame Resource Preparation - only render if preparation succeeds
+      if(prepareFrameResources())
+      {
+        // Begin command buffer recording
+        VkCommandBuffer cmd = beginCommandRecording();
+
+        // Record rendering commands
+        drawFrame(cmd);
+
+        // End frame and present
+        endFrame(cmd);
+      }
+      else
+      {
+        // If frame preparation failed (e.g., swapchain needs rebuild), just skip this frame
+        // The next frame will try again
+      }
 
       // Update and Render additional Platform Windows (floating windows)
       ImGui::EndFrame();
@@ -2392,7 +2409,7 @@ private:
    * 
    * 4. Finalization
    *    - Begins dynamic rendering in swapchain
-   *    - Renders ImGui, which displays the GBuffer image
+   *    - Renders UI overlay
    * 
    * 4. Frame Submission
    *    - Submits command buffer
@@ -2400,12 +2417,8 @@ private:
    * 
    * Note: Uses dynamic rendering instead of traditional render passes
   -*/
-  void drawFrame()
+  void drawFrame(VkCommandBuffer cmd)
   {
-    VkCommandBuffer cmd = beginFrame();
-    if(cmd == VK_NULL_HANDLE)
-      return;  // Swapchain needs to be rebuilt
-
     /*-- The ImGui code -*/
 
     /*-- 
@@ -2456,57 +2469,8 @@ private:
       ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
     }
     endDynamicRenderingToSwapchain(cmd);
-
-    endFrame(cmd);
   }
 
-  /*---
-   * Begin frame is the first step in the rendering process.
-   * It looks if the swapchain require rebuild, which happens when the window is resized.
-   * It resets the command pool to reuse the command buffer for recording new rendering commands for the current frame.
-   * It acquires the image from the swapchain to render into.
-   * And it returns the command buffer for the frame.
-  -*/
-  VkCommandBuffer beginFrame()
-  {
-    VkDevice device = m_context.getDevice();
-
-    if(m_swapchain.needRebuilding())
-    {
-      m_windowSize = m_swapchain.reinitResources(m_vSync);
-    }
-
-    // Get the frame data for the current frame in the ring buffer
-    auto& frame = m_frameData[m_frameRingCurrent];
-
-    // Wait until GPU has finished processing the frame that was using these resources previously (numFramesInFlight frames ago)
-    const VkSemaphoreWaitInfo waitInfo = {
-        .sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-        .semaphoreCount = 1,
-        .pSemaphores    = &m_frameTimelineSemaphore,
-        .pValues        = &m_frameData[m_frameRingCurrent].frameNumber,
-    };
-    vkWaitSemaphores(device, &waitInfo, std::numeric_limits<uint64_t>::max());
-
-    /*--
-     * Reset the command pool to reuse the command buffer for recording
-     * new rendering commands for the current frame.
-    -*/
-    VK_CHECK(vkResetCommandPool(device, frame.cmdPool, 0));
-    VkCommandBuffer cmd = frame.cmdBuffer;
-
-    // Begin the command buffer recording for the frame
-    const VkCommandBufferBeginInfo beginInfo{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
-
-    // Acquire the image to render into
-    VkResult result = m_swapchain.acquireNextImage(device);
-    if(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
-      return cmd;
-
-    return {};
-  }
 
   /*--
    * End the frame by submitting the command buffer to the GPU and presenting the image.
@@ -3398,6 +3362,64 @@ private:
   bool     m_vSync{false};        // VSync on or off
   int      m_imageID{0};          // The current image to display
   uint32_t m_maxTextures{10000};  // Maximum textures allowed in the application
+
+  /*---
+   * Prepare frame resources - the first step in the rendering process.
+   * It looks if the swapchain require rebuild, which happens when the window is resized.
+   * It acquires the image from the swapchain to render into.
+   * Returns true if we can proceed with rendering, false otherwise.
+  -*/
+  bool prepareFrameResources()
+  {
+    // Get the frame data for the current frame in the ring buffer
+    auto& frame = m_frameData[m_frameRingCurrent];
+
+    // Check if swapchain needs rebuilding (this internally calls vkQueueWaitIdle())
+    if(m_swapchain.needRebuilding())
+    {
+      m_windowSize = m_swapchain.reinitResources(m_vSync);
+    }
+
+    // Wait until GPU has finished processing the frame that was using these resources previously
+    // Note: If swapchain was rebuilt above, this wait is essentially a no-op since vkQueueWaitIdle() was already called
+    const VkSemaphoreWaitInfo waitInfo = {
+        .sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .semaphoreCount = 1,
+        .pSemaphores    = &m_frameTimelineSemaphore,
+        .pValues        = &frame.frameNumber,
+    };
+    vkWaitSemaphores(m_context.getDevice(), &waitInfo, std::numeric_limits<uint64_t>::max());
+
+    VkResult result = m_swapchain.acquireNextImage(m_context.getDevice());
+    return (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR);  // Continue only if we got a valid image
+  }
+
+  /*---
+   * Begin command buffer recording for the frame
+   * It resets the command pool to reuse the command buffer for recording new rendering commands for the current frame.
+   * Returns the command buffer for the frame.
+  -*/
+  VkCommandBuffer beginCommandRecording()
+  {
+    VkDevice device = m_context.getDevice();
+
+    // Get the frame data for the current frame in the ring buffer
+    auto& frame = m_frameData[m_frameRingCurrent];
+
+    /*--
+     * Reset the command pool to reuse the command buffer for recording
+     * new rendering commands for the current frame.
+    -*/
+    VK_CHECK(vkResetCommandPool(device, frame.cmdPool, 0));
+    VkCommandBuffer cmd = frame.cmdBuffer;
+
+    // Begin the command buffer recording for the frame
+    const VkCommandBufferBeginInfo beginInfo{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+    return cmd;
+  }
 };
 
 //--- Main ---------------------------------------------------------------------------------------------------------------
