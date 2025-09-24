@@ -1367,7 +1367,7 @@ private:
       return VK_PRESENT_MODE_IMMEDIATE_KHR;  // Best mode for low latency
     }
 
-    return VK_PRESENT_MODE_FIFO_KHR;
+    return VK_PRESENT_MODE_FIFO_KHR;  // Fallback to FIFO if neither MAILBOX nor IMMEDIATE is available
   }
 
 private:
@@ -1386,6 +1386,36 @@ private:
   bool                        m_needRebuild        = false;
 
   uint32_t m_maxFramesInFlight = 3;  // Best for pretty much all cases
+};
+
+//--- Frame Pacer ------------------------------------------------------------------------------------------------------------
+// This is a simple frame pacer to limit the frame rate to the target FPS. (vsync on)
+// This is needed to reduce the latency (user interaction and time to see update).
+// Try: enable vsync and change rapidly the clear color, you will see the latency.
+//      do the same without this frame pacer, the latency has increased.
+class FramePacer
+{
+public:
+  FramePacer()  = default;
+  ~FramePacer() = default;
+
+  // Frame rate limiting to monitor refresh rate
+  void paceFrame(float targetFPS = 59.0f)
+  {
+    const double targetFrameTime = (1.0 / targetFPS);
+
+    auto currentTime   = std::chrono::high_resolution_clock::now();
+    auto frameDuration = std::chrono::duration<double>(currentTime - m_lastFrameTime).count();
+    if(frameDuration < targetFrameTime)
+    {
+      auto sleepTime = std::chrono::duration<double>(targetFrameTime - frameDuration);
+      std::this_thread::sleep_for(sleepTime - std::chrono::milliseconds(1));  // Sleep a bit less to avoid oversleeping (1ms margin)
+    }
+    m_lastFrameTime = std::chrono::high_resolution_clock::now();
+  }
+
+private:
+  std::chrono::high_resolution_clock::time_point m_lastFrameTime;
 };
 
 //--- Resource Allocator ------------------------------------------------------------------------------------------------------------
@@ -1905,10 +1935,10 @@ private:
         m_res.descriptor[c].imageLayout = layout;
 
         // Clear to avoid garbage data
-        const VkClearColorValue                      clear_value = {{0.F, 0.F, 0.F, 0.F}};
-        const std::array<VkImageSubresourceRange, 1> range       = {
+        const VkClearColorValue                      clearValue = {{0.F, 0.F, 0.F, 0.F}};
+        const std::array<VkImageSubresourceRange, 1> range      = {
             {{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1}}};
-        vkCmdClearColorImage(cmd, m_res.gBufferColor[c].image, layout, &clear_value, uint32_t(range.size()), range.data());
+        vkCmdClearColorImage(cmd, m_res.gBufferColor[c].image, layout, &clearValue, uint32_t(range.size()), range.data());
       }
     }
 
@@ -2052,6 +2082,7 @@ public:
     // Main rendering loop
     while(!glfwWindowShouldClose(m_window))
     {
+      m_framePacer.paceFrame(m_vSync ? 59.0f : 10000.0f);  // Limit to 59 FPS if vSync is enabled (avoid skipping frames)
       glfwPollEvents();
       if(glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE)
       {
@@ -2450,7 +2481,10 @@ private:
     {
       ImGui::RadioButton("Image 1", &m_imageID, 0);
       ImGui::RadioButton("Image 2", &m_imageID, 1);
+      ImGui::Separator();
+      ImGui::ColorPicker3("Clear Color", &m_clearColor.float32[0]);
     }
+
     ImGui::End();
     ImGui::Render();  // This is creating the data to draw the UI (not on GPU yet)
 
@@ -2732,7 +2766,7 @@ private:
         .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,   // Clear the image (see clearValue)
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,  // Store the image (keep the image)
-        .clearValue  = {{{0.2f, 0.2f, 0.3f, 1.0f}}},
+        .clearValue  = {{m_clearColor}},
     }}};
 
     // Depth buffer to use
@@ -3357,11 +3391,12 @@ private:
   std::vector<FrameData> m_frameData{};    // Collection of per-frame resources to support multiple frames in flight
   VkSemaphore m_frameTimelineSemaphore{};  // Timeline semaphore used to synchronize CPU submission with GPU completion
   uint32_t    m_frameRingCurrent{0};       // Current frame index in the ring buffer (cycles through available frames)
+  utils::FramePacer m_framePacer;          // Utility to pace the frame rate
 
-
-  bool     m_vSync{false};        // VSync on or off
-  int      m_imageID{0};          // The current image to display
-  uint32_t m_maxTextures{10000};  // Maximum textures allowed in the application
+  bool              m_vSync{false};                          // VSync on or off
+  int               m_imageID{0};                            // The current image to display
+  uint32_t          m_maxTextures{10000};                    // Maximum textures allowed in the application
+  VkClearColorValue m_clearColor{{0.2f, 0.2f, 0.3f, 1.0f}};  // The clear color
 
   /*---
    * Prepare frame resources - the first step in the rendering process.
