@@ -170,10 +170,12 @@ this regular expression:
 
 // Standard C++ includes
 #include <array>
+#include <chrono>         // For std::chrono::high_resolution_clock, std::chrono::duration
 #include <cmath>          // For std::sin, ... functions
 #include <filesystem>     // For std::filesystem::path ...
 #include <iostream>       // For std::cerr
 #include <span>           // For std::span
+#include <thread>         // For std::this_thread::sleep_for
 #include <unordered_map>  // For std::unordered_map
 #include <vector>         // For std::vector
 

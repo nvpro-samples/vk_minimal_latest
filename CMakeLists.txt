@@ -126,6 +126,13 @@ target_sources(${MYPROJ} PRIVATE ${STB_IMAGE_PATH})
 source_group("stb" FILES ${STB_IMAGE_PATH})
 target_include_directories(${MYPROJ} PRIVATE "${CMAKE_BINARY_DIR}")
 
+# Find system libraries needed by GLFW on Linux
+if(UNIX AND NOT APPLE)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(X11 REQUIRED x11)
+  find_package(Threads REQUIRED)
+endif()
+
 # Link libraries and include directories
 target_link_libraries(${MYPROJ} PRIVATE
   glfw
@@ -133,6 +140,11 @@ target_link_libraries(${MYPROJ} PRIVATE
   imgui
   glm
 )
+
+# Link system libraries on Linux
+if(UNIX AND NOT APPLE)
+  target_link_libraries(${MYPROJ} PRIVATE ${X11_LIBRARIES} Threads::Threads)
+endif()
 
 target_include_directories(${MYPROJ} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}}
 )
