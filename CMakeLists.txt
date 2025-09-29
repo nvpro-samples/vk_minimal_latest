@@ -128,8 +128,7 @@ target_include_directories(${MYPROJ} PRIVATE "${CMAKE_BINARY_DIR}")
 
 # Find system libraries needed by GLFW on Linux
 if(UNIX AND NOT APPLE)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(X11 REQUIRED x11)
+  find_package(X11 REQUIRED)
   find_package(Threads REQUIRED)
 endif()
 

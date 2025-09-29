@@ -3054,21 +3054,25 @@ private:
     ImGui_ImplGlfw_InitForVulkan(m_window, true);
     static VkFormat           imageFormats[] = {m_swapchain.getImageFormat()};
     ImGui_ImplVulkan_InitInfo initInfo       = {
-              .Instance                    = m_context.getInstance(),
-              .PhysicalDevice              = m_context.getPhysicalDevice(),
-              .Device                      = m_context.getDevice(),
-              .QueueFamily                 = m_context.getGraphicsQueue().familyIndex,
-              .Queue                       = m_context.getGraphicsQueue().queue,
-              .DescriptorPool              = m_uiDescriptorPool,
-              .MinImageCount               = 2,
-              .ImageCount                  = m_swapchain.getMaxFramesInFlight(),
-              .UseDynamicRendering         = true,
-              .PipelineRenderingCreateInfo =  // Dynamic rendering
-        {
-                  .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-                  .colorAttachmentCount    = 1,
-                  .pColorAttachmentFormats = imageFormats,
-        },
+              .Instance       = m_context.getInstance(),
+              .PhysicalDevice = m_context.getPhysicalDevice(),
+              .Device         = m_context.getDevice(),
+              .QueueFamily    = m_context.getGraphicsQueue().familyIndex,
+              .Queue          = m_context.getGraphicsQueue().queue,
+              .DescriptorPool = m_uiDescriptorPool,
+              .MinImageCount  = 2,
+              .ImageCount     = m_swapchain.getMaxFramesInFlight(),
+              .PipelineInfoMain =
+            {
+                      .PipelineRenderingCreateInfo =  // Dynamic rendering
+                {
+                          .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+                          .colorAttachmentCount    = 1,
+                          .pColorAttachmentFormats = imageFormats,
+                },
+            },
+              .PipelineInfoForViewports = initInfo.PipelineInfoMain,
+              .UseDynamicRendering      = true,
     };
 
     ImGui_ImplVulkan_Init(&initInfo);
