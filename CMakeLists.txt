@@ -145,6 +145,13 @@ if(UNIX AND NOT APPLE)
   target_link_libraries(${MYPROJ} PRIVATE ${X11_LIBRARIES} Threads::Threads)
 endif()
 
+# On Windows, link with the Windows Multimedia .lib file so we can increase
+# timer precision using timeBeginPeriod(). This only uses kernelbase.dll.
+if(WIN32)
+  target_link_libraries(${MYPROJ} PRIVATE winmm.lib)
+endif()
+
+
 target_include_directories(${MYPROJ} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}}
 )
 

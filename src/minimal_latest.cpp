@@ -168,12 +168,21 @@ this regular expression:
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+// The frame pacer uses Windows APIs if available to get more precise timing.
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#undef APIENTRY  // GLFW defines this but Windows tries to redefine it
+#include <Windows.h>
+#include <timeapi.h>
+#endif
+
 // Standard C++ includes
 #include <array>
 #include <chrono>         // For std::chrono::high_resolution_clock, std::chrono::duration
 #include <cmath>          // For std::sin, ... functions
 #include <filesystem>     // For std::filesystem::path ...
 #include <iostream>       // For std::cerr
+#include <limits>         // for std::numeric_limits<double>::infinity()
 #include <span>           // For std::span
 #include <thread>         // For std::this_thread::sleep_for
 #include <unordered_map>  // For std::unordered_map
@@ -1391,10 +1400,19 @@ private:
 };
 
 //--- Frame Pacer ------------------------------------------------------------------------------------------------------------
-// This is a simple frame pacer to limit the frame rate to the target FPS. (vsync on)
-// This is needed to reduce the latency (user interaction and time to see update).
-// Try: enable vsync and change rapidly the clear color, you will see the latency.
-//      do the same without this frame pacer, the latency has increased.
+// This is a simple frame pacer to limit the frame rate to the target FPS.
+// This significantly helps with latency (from interaction to seeing the update
+// on screen) when VSync is on.
+// Try this: Enable VSync and rapidly change the clear color using your mouse.
+//           Now do the same without this frame pacer; you'll see that without
+//           the pacer, the clear color lags behind the mouse by several frames.
+//
+// The core idea here is that when VSync is on, the screen only displays one
+// image per VSync. So if we rendered faster, we'd either queue up too many
+// frames in the swapchain (VK_PRESENT_MODE_FIFO) or use too much power by
+// rendering frames that are never displayed (some VK_PRESENT_MODE_MAILBOX
+// implementations). Since the compositor consumes only one image per VSync,
+// we should render only at most one image per VSync.
 class FramePacer
 {
 public:
@@ -1402,23 +1420,77 @@ public:
   ~FramePacer() = default;
 
   // Frame rate limiting to monitor refresh rate
-  void paceFrame(float targetFPS = 59.0f)
+  void paceFrame(double targetFPS = 60.0)
   {
-    const double targetFrameTime = (1.0 / targetFPS);
+    const auto targetFrameTime = std::chrono::duration<double>(1.0 / targetFPS);
 
-    auto currentTime   = std::chrono::high_resolution_clock::now();
-    auto frameDuration = std::chrono::duration<double>(currentTime - m_lastFrameTime).count();
-    if(frameDuration < targetFrameTime)
+    // Pacing the CPU by enforcing at least `refreshInterval` seconds between
+    // frames is all we need! If the GPU is fast things are OK; if the GPU is
+    // slow then vkWaitSemaphores will take more time in the frame, which
+    // will be counted in the CPU time.
+    const auto currentTime   = std::chrono::high_resolution_clock::now();
+    const auto frameDuration = currentTime - m_lastFrameTime;
+    auto       sleepTime     = targetFrameTime - frameDuration;
+#ifdef _WIN32
+    // On Windows, we know that 1ms is just about the right time to subtract;
+    // it's just under the average amount that Windows adds to the sleep call.
+    // On Linux the timers are accurate enough that we don't need this.
+    sleepTime -= std::chrono::duration<double>(std::chrono::milliseconds(1));
+#endif
+    if(sleepTime > std::chrono::duration<double>(0))
     {
-      auto sleepTime = std::chrono::duration<double>(targetFrameTime - frameDuration);
-      std::this_thread::sleep_for(sleepTime - std::chrono::milliseconds(1));  // Sleep a bit less to avoid oversleeping (1ms margin)
+#ifdef _WIN32
+      // On Windows, the default timer might quantize to 15.625 ms; see
+      // https://randomascii.wordpress.com/2020/10/04/windows-timer-resolution-the-great-rule-change/ .
+      // We use timeBeginPeriod to temporarily increase the resolution to 1 ms.
+      timeBeginPeriod(1);
+#endif
+      std::this_thread::sleep_for(sleepTime);
+#ifdef _WIN32
+      timeEndPeriod(1);
+#endif
     }
+
     m_lastFrameTime = std::chrono::high_resolution_clock::now();
   }
 
 private:
   std::chrono::high_resolution_clock::time_point m_lastFrameTime;
 };
+
+// Helper to return the minimum refresh rate of all monitors.
+static double getMonitorsMinRefreshRate()
+{
+  // We need our target frame rate. We get this once per frame in case the
+  // user changes their monitor's frame rate.
+  // Ideally we'd get the exact composition rate for the current swapchain;
+  // VK_EXT_present_timing will hopefully give us that when it's released.
+  // Currently we use GLFW; this means we don't need anything
+  // platform-specific, but means we only get an integer frame rate,
+  // rounded down, across monitors. We take the minimum to avoid building up
+  // frame latency.
+  double refreshRate = std::numeric_limits<double>::infinity();
+  {
+    int           numMonitors = 0;
+    GLFWmonitor** monitors    = glfwGetMonitors(&numMonitors);
+    for(int i = 0; i < numMonitors; i++)
+    {
+      const GLFWvidmode* videoMode = glfwGetVideoMode(monitors[i]);
+      if(videoMode)
+      {
+        refreshRate = std::min(refreshRate, static_cast<double>(videoMode->refreshRate));
+      }
+    }
+  }
+  // If we have no information about the frame rate or an impossible value,
+  // use a default.
+  if(std::isinf(refreshRate) || refreshRate <= 0.0)
+  {
+    refreshRate = 60.0;
+  }
+
+  return refreshRate;
+}
 
 //--- Resource Allocator ------------------------------------------------------------------------------------------------------------
 /*--
@@ -2084,7 +2156,7 @@ public:
     // Main rendering loop
     while(!glfwWindowShouldClose(m_window))
     {
-      m_framePacer.paceFrame(m_vSync ? 59.0f : 10000.0f);  // Limit to 59 FPS if vSync is enabled (avoid skipping frames)
+      m_framePacer.paceFrame(m_vSync ? utils::getMonitorsMinRefreshRate() : 10000.0);
       glfwPollEvents();
       if(glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE)
       {
