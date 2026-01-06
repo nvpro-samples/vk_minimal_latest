@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2025, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -350,73 +350,82 @@ static std::size_t hashCombine(std::size_t seed, auto const& value)
   return seed ^ (std::hash<std::decay_t<decltype(value)>>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2));
 }
 
-/*-- 
- * This returns the pipeline and access flags for a given layout, use for changing the image layout  
+/*--
+ * Initialize a newly created image to GENERAL layout (used for color/depth buffers)
 -*/
-static std::tuple<VkPipelineStageFlags2, VkAccessFlags2> makePipelineStageAccessTuple(VkImageLayout state)
+static void cmdInitImageLayout(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT)
 {
-  switch(state)
-  {
-    case VK_IMAGE_LAYOUT_UNDEFINED:
-      return std::make_tuple(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE);
-    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-      return std::make_tuple(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-      return std::make_tuple(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                 | VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT,
-                             VK_ACCESS_2_SHADER_READ_BIT);
-    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-      return std::make_tuple(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    case VK_IMAGE_LAYOUT_GENERAL:
-      return std::make_tuple(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
-      return std::make_tuple(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_NONE);
-    default: {
-      ASSERT(false, "Unsupported layout transition!");
-      return std::make_tuple(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-    }
-  }
-};
+  const VkImageMemoryBarrier2 barrier{
+      .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask  = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+      .srcAccessMask = VK_ACCESS_2_NONE,
+      .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+      .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,
+      .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image               = image,
+      .subresourceRange    = {aspectMask, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
 
-/*-- 
- * Return the barrier with the most common pair of stage and access flags for a given layout 
--*/
-static VkImageMemoryBarrier2 createImageMemoryBarrier(VkImage       image,
-                                                      VkImageLayout oldLayout,
-                                                      VkImageLayout newLayout,
-                                                      VkImageSubresourceRange subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,
-                                                                                                  0, 1, 0, 1})
-{
-  const auto [srcStage, srcAccess] = makePipelineStageAccessTuple(oldLayout);
-  const auto [dstStage, dstAccess] = makePipelineStageAccessTuple(newLayout);
+  const VkDependencyInfo depInfo{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
 
-  VkImageMemoryBarrier2 barrier{.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                                .srcStageMask        = srcStage,
-                                .srcAccessMask       = srcAccess,
-                                .dstStageMask        = dstStage,
-                                .dstAccessMask       = dstAccess,
-                                .oldLayout           = oldLayout,
-                                .newLayout           = newLayout,
-                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                .image               = image,
-                                .subresourceRange    = subresourceRange};
-  return barrier;
+  vkCmdPipelineBarrier2(cmd, &depInfo);
 }
 
 /*--
- * A helper function to transition an image from one layout to another.
- * In the pipeline, the image must be in the correct layout to be used, and this function is used to transition the image to the correct layout.
+ * Transition swapchain image layout for the presentation/rendering cycle:
+ * - UNDEFINED -> PRESENT_SRC_KHR (swapchain initialization)
+ * - PRESENT_SRC_KHR <-> GENERAL (rendering cycle)
 -*/
-static void cmdTransitionImageLayout(VkCommandBuffer    cmd,
-                                     VkImage            image,
-                                     VkImageLayout      oldLayout,
-                                     VkImageLayout      newLayout,
-                                     VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT)
+static void cmdTransitionSwapchainLayout(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout)
 {
-  const VkImageMemoryBarrier2 barrier = createImageMemoryBarrier(image, oldLayout, newLayout, {aspectMask, 0, 1, 0, 1});
+  VkPipelineStageFlags2 srcStage = 0, dstStage = 0;
+  VkAccessFlags2        srcAccess = 0, dstAccess = 0;
+
+  if(oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+  {
+    // Swapchain initialization
+    srcStage  = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+    srcAccess = VK_ACCESS_2_NONE;
+    dstStage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dstAccess = VK_ACCESS_2_NONE;
+  }
+  else if(oldLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && newLayout == VK_IMAGE_LAYOUT_GENERAL)
+  {
+    // Before rendering
+    srcStage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    srcAccess = VK_ACCESS_2_NONE;
+    dstStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    dstAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+  }
+  else if(oldLayout == VK_IMAGE_LAYOUT_GENERAL && newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+  {
+    // After rendering
+    srcStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    srcAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    dstStage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dstAccess = VK_ACCESS_2_NONE;
+  }
+  else
+  {
+    ASSERT(false, "Unsupported swapchain layout transition!");
+    srcStage = dstStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    srcAccess = dstAccess = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+  }
+
+  const VkImageMemoryBarrier2 barrier{.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                      .srcStageMask        = srcStage,
+                                      .srcAccessMask       = srcAccess,
+                                      .dstStageMask        = dstStage,
+                                      .dstAccessMask       = dstAccess,
+                                      .oldLayout           = oldLayout,
+                                      .newLayout           = newLayout,
+                                      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                      .image               = image,
+                                      .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+
   const VkDependencyInfo depInfo{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
 
   vkCmdPipelineBarrier2(cmd, &depInfo);
@@ -503,7 +512,7 @@ static VkFormat findSupportedFormat(VkPhysicalDevice             physicalDevice,
     {
       return format;
     }
-    else if(tiling == VK_IMAGE_TILING_OPTIMAL && (props.formatProperties.optimalTilingFeatures & features) == features)
+    if(tiling == VK_IMAGE_TILING_OPTIMAL && (props.formatProperties.optimalTilingFeatures & features) == features)
     {
       return format;
     }
@@ -529,7 +538,7 @@ static VkShaderModule createShaderModule(VkDevice device, const std::span<const 
 {
   const VkShaderModuleCreateInfo createInfo{.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                             .codeSize = code.size() * sizeof(uint32_t),
-                                            .pCode    = reinterpret_cast<const uint32_t*>(code.data())};
+                                            .pCode    = static_cast<const uint32_t*>(code.data())};
   VkShaderModule                 shaderModule{};
   VK_CHECK(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule));
   return shaderModule;
@@ -576,12 +585,17 @@ static void endSingleTimeCommands(VkCommandBuffer cmd, VkDevice device, VkComman
   vkFreeCommandBuffers(device, cmdPool, 1, &cmd);
 }
 
-// Helper to chain elements to the pNext
+// Helper to chain Vulkan structures to the pNext chain
+// Uses VkBaseOutStructure for type-safe chaining following Vulkan conventions
 template <typename MainT, typename NewT>
 static void pNextChainPushFront(MainT* mainStruct, NewT* newStruct)
 {
-  newStruct->pNext  = mainStruct->pNext;
-  mainStruct->pNext = newStruct;
+  // Cast to VkBaseOutStructure for proper pNext handling
+  auto* newBase  = reinterpret_cast<VkBaseOutStructure*>(newStruct);
+  auto* mainBase = reinterpret_cast<VkBaseOutStructure*>(mainStruct);
+
+  newBase->pNext  = mainBase->pNext;
+  mainBase->pNext = newBase;
 }
 
 // Validation settings: to fine tune what is checked
@@ -599,7 +613,8 @@ struct ValidationSettings
   VkBool32 object_lifetime{VK_TRUE};
   VkBool32 stateless_param{VK_TRUE};
   std::vector<const char*> debug_action{"VK_DBG_LAYER_ACTION_LOG_MSG"};  // "VK_DBG_LAYER_ACTION_DEBUG_OUTPUT", "VK_DBG_LAYER_ACTION_BREAK"
-  std::vector<const char*> report_flags{"error"};
+  std::vector<const char*> report_flags{"error", "warn"};  // Enable both errors and warnings
+  std::vector<const char*> message_id_filter{"WARNING-legacy-gpdp2"};  // Filter: legacy vkGetPhysicalDeviceProperties warning from third-party libs (ImGui/VMA)
 
   VkBaseInStructure* buildPNextChain()
   {
@@ -617,6 +632,8 @@ struct ValidationSettings
         {layerName, "stateless_param", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &stateless_param},
         {layerName, "debug_action", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(debug_action.size()), debug_action.data()},
         {layerName, "report_flags", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(report_flags.size()), report_flags.data()},
+        {layerName, "message_id_filter", VK_LAYER_SETTING_TYPE_STRING_EXT, uint32_t(message_id_filter.size()),
+         message_id_filter.data()},
 
     };
     layerSettingsCreateInfo = {
@@ -629,8 +646,54 @@ struct ValidationSettings
   }
 
   static constexpr const char*   layerName{"VK_LAYER_KHRONOS_validation"};
-  std::vector<VkLayerSettingEXT> layerSettings{};
+  std::vector<VkLayerSettingEXT> layerSettings;
   VkLayerSettingsCreateInfoEXT   layerSettingsCreateInfo{};
+};
+
+//--- Vulkan Context Configuration ------------------------------------------------------------------------------------------------------------
+
+/*--
+ * Configuration for device extensions.
+ * - name: The extension name (e.g., VK_KHR_SWAPCHAIN_EXTENSION_NAME)
+ * - required: If true, the application will assert if the extension is not available
+ * - featureStruct: Pointer to the feature structure to enable (or nullptr if no feature struct needed)
+-*/
+struct ExtensionConfig
+{
+  const char* name          = nullptr;
+  bool        required      = false;
+  void*       featureStruct = nullptr;
+};
+
+/*--
+ * Configuration structure for Context initialization.
+ * This allows customization of instance/device extensions, layers, and features.
+ * 
+ * Usage:
+ *   ContextCreateInfo config;
+ *   config.deviceExtensions.push_back({VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, true, &rtFeatures, VK_STRUCTURE_TYPE_...});
+ *   context.init(config);
+-*/
+struct ContextCreateInfo
+{
+  // Instance configuration
+  std::vector<const char*> instanceExtensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME};
+  std::vector<const char*> instanceLayers;
+
+  // API version
+  uint32_t apiVersion = VK_API_VERSION_1_4;
+
+  // Validation layers
+#ifdef NDEBUG
+  bool enableValidationLayers = false;
+#else
+  bool enableValidationLayers = true;
+#endif
+
+  // Device extensions with their configuration
+  // Note: These are the extensions that will be requested from the device
+  // The Context will check availability and enable them based on the 'required' flag
+  std::vector<ExtensionConfig> deviceExtensions;
 };
 
 //--- Vulkan Context ------------------------------------------------------------------------------------------------------------
@@ -642,9 +705,8 @@ struct ValidationSettings
  * The logical device is the interface to the physical device.
  * The queue is used to submit command buffers to the GPU.
  *
- * This class will add default extensions and layers to the Vulkan instance, same as for the logical device.
- * It will also create a debug callback if the validation layers are enabled.
- * For more flexibility, a custom list of extensions and layers should be added.
+ * Extensions and features are configured externally via ContextCreateInfo.
+ * The context will check availability and enable them based on the configuration.
 -*/
 class Context
 {
@@ -652,8 +714,9 @@ public:
   Context() = default;
   ~Context() { assert(m_device == VK_NULL_HANDLE && "Missing destroy()"); }
 
-  void init()
+  void init(const ContextCreateInfo& createInfo)
   {
+    m_createInfo = createInfo;
     initInstance();
     selectPhysicalDevice();
     initLogicalDevice();
@@ -663,7 +726,7 @@ public:
   void deinit()
   {
     vkDeviceWaitIdle(m_device);
-    if(m_enableValidationLayers && vkDestroyDebugUtilsMessengerEXT)
+    if(m_createInfo.enableValidationLayers && vkDestroyDebugUtilsMessengerEXT)
     {
       vkDestroyDebugUtilsMessengerEXT(m_instance, m_callback, nullptr);
     }
@@ -677,16 +740,6 @@ public:
   VkInstance       getInstance() const { return m_instance; }
   const QueueInfo& getGraphicsQueue() const { return m_queues[0]; }
   uint32_t         getApiVersion() const { return m_apiVersion; }
-
-  VkPhysicalDeviceFeatures2                        getPhysicalDeviceFeatures() const { return m_deviceFeatures; }
-  VkPhysicalDeviceVulkan11Features                 getVulkan11Features() const { return m_features11; }
-  VkPhysicalDeviceVulkan12Features                 getVulkan12Features() const { return m_features12; }
-  VkPhysicalDeviceVulkan13Features                 getVulkan13Features() const { return m_features13; }
-  VkPhysicalDeviceVulkan14Features                 getVulkan14Features() const { return m_features14; }
-  VkPhysicalDeviceExtendedDynamicStateFeaturesEXT  getDynamicStateFeatures() const { return m_dynamicStateFeatures; }
-  VkPhysicalDeviceExtendedDynamicState2FeaturesEXT getDynamicState2Features() const { return m_dynamicState2Features; }
-  VkPhysicalDeviceExtendedDynamicState3FeaturesEXT getDynamicState3Features() const { return m_dynamicState3Features; }
-  VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT getSwapchainFeatures() const { return m_swapchainFeatures; }
 
 
 private:
@@ -733,17 +786,28 @@ private:
         .apiVersion         = m_apiVersion,
     };
 
-    // Add extensions requested by GLFW
-    m_instanceExtensions.insert(m_instanceExtensions.end(), glfwExtensions, glfwExtensions + glfwExtensionCount);
+    // Build instance extensions list from config
+    std::vector<const char*> instanceExtensions = m_createInfo.instanceExtensions;
+
+    // Add extensions requested by GLFW (required for windowing)
+    for(uint32_t i = 0; i < glfwExtensionCount; i++)
+    {
+      instanceExtensions.push_back(glfwExtensions[i]);
+    }
+
+    // Add optional instance extensions if available
     if(extensionIsAvailable(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, m_instanceExtensionsAvailable))
-      m_instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);  // Allow debug utils (naming objects)
-    if(extensionIsAvailable(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME, m_instanceExtensionsAvailable))
-      m_instanceExtensions.push_back(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
+      instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    if(extensionIsAvailable(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME, m_instanceExtensionsAvailable))
+      instanceExtensions.push_back(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
+
+    // Build instance layers list from config
+    std::vector<const char*> instanceLayers = m_createInfo.instanceLayers;
 
     // Adding the validation layer
-    if(m_enableValidationLayers)
+    if(m_createInfo.enableValidationLayers)
     {
-      m_instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
+      instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
     }
 
     // Setting for the validation layer
@@ -753,10 +817,10 @@ private:
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext                   = validationSettings.buildPNextChain(),
         .pApplicationInfo        = &applicationInfo,
-        .enabledLayerCount       = uint32_t(m_instanceLayers.size()),
-        .ppEnabledLayerNames     = m_instanceLayers.data(),
-        .enabledExtensionCount   = uint32_t(m_instanceExtensions.size()),
-        .ppEnabledExtensionNames = m_instanceExtensions.data(),
+        .enabledLayerCount       = uint32_t(instanceLayers.size()),
+        .ppEnabledLayerNames     = instanceLayers.data(),
+        .enabledExtensionCount   = uint32_t(instanceExtensions.size()),
+        .ppEnabledExtensionNames = instanceExtensions.data(),
     };
 
     // Actual Vulkan instance creation
@@ -766,7 +830,7 @@ private:
     volkLoadInstance(m_instance);
 
     // Add the debug callback
-    if(m_enableValidationLayers && vkCreateDebugUtilsMessengerEXT)
+    if(m_createInfo.enableValidationLayers && vkCreateDebugUtilsMessengerEXT)
     {
       const VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info{
           .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -851,9 +915,7 @@ private:
    * The logical device is the interface to the physical device.
    * It is used to create resources, allocate memory, and submit command buffers to the GPU.
    * The logical device is created with the physical device and the queue family that is used.
-   * The logical device is created with the extensions and features that are needed.
-   * Note: the feature structure is used to add all features up to Vulkan 1.4, but it can be used to add specific features.
-   *       This class does not add any specific feature, or extension, but it can be added by the user.
+   * The logical device is created with the extensions and features configured in ContextCreateInfo.
   -*/
   void initLogicalDevice()
   {
@@ -876,47 +938,49 @@ private:
     pNextChainPushFront(&m_features11, &m_features14);
 
     /*-- 
-     * Check if the device supports the required extensions 
-     * Because we cannot request a device with extension it is not supporting
+     * Process device extensions from configuration:
+     * - Check if each extension is available on the device
+     * - Enable required extensions (assert if not available)
+     * - Enable optional extensions (skip if not available)
+     * - Link provided feature structs to the pNext chain
     -*/
     getAvailableDeviceExtensions();
-    if(extensionIsAvailable(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, m_deviceExtensionsAvailable))
-    {
-      m_deviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-    }
-    if(extensionIsAvailable(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME, m_deviceExtensionsAvailable))
-    {
-      pNextChainPushFront(&m_features11, &m_dynamicStateFeatures);
-      m_deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
-    }
-    if(extensionIsAvailable(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME, m_deviceExtensionsAvailable))
-    {
-      pNextChainPushFront(&m_features11, &m_dynamicState2Features);
-      m_deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
-    }
-    if(extensionIsAvailable(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, m_deviceExtensionsAvailable))
-    {
-      pNextChainPushFront(&m_features11, &m_dynamicState3Features);
-      m_deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
-    }
-    if(extensionIsAvailable(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME, m_deviceExtensionsAvailable))
-    {
-      pNextChainPushFront(&m_features11, &m_swapchainFeatures);
-      m_deviceExtensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
-    }
 
-    // ImGui - Fix (Not using Vulkan 1.4 API)
-    m_deviceExtensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+    std::vector<const char*> deviceExtensions;
+    for(const auto& extConfig : m_createInfo.deviceExtensions)
+    {
+      if(extensionIsAvailable(extConfig.name, m_deviceExtensionsAvailable))
+      {
+        deviceExtensions.push_back(extConfig.name);
+
+        // Link feature struct if provided via ExtensionConfig::featureStruct
+        if(extConfig.featureStruct != nullptr)
+        {
+          pNextChainPushFront(&m_features11, extConfig.featureStruct);
+        }
+      }
+      else if(extConfig.required)
+      {
+        // Extension is required but not available - fail with error message
+        LOGE("Required extension %s is not available!", extConfig.name);
+        ASSERT(false, "Required device extension not available, update driver!");
+      }
+      else
+      {
+        // Extension is optional and not available - skip it
+        LOGW("Optional extension %s is not available, skipping", extConfig.name);
+      }
+    }
 
     // Requesting all supported features, which will then be activated in the device
-    // By requesting, it turns on all feature that it is supported, but the user could request specific features instead
     m_deviceFeatures.pNext = &m_features11;
     vkGetPhysicalDeviceFeatures2(m_physicalDevice, &m_deviceFeatures);
 
+    // Validate core required features (from Vulkan 1.3 and 1.4)
     ASSERT(m_features13.dynamicRendering, "Dynamic rendering required, update driver!");
-    ASSERT(m_features13.maintenance4, "Extension VK_KHR_maintenance4 required, update driver!");  // vkGetDeviceBufferMemoryRequirementsKHR, ...
-    ASSERT(m_features14.maintenance5, "Extension VK_KHR_maintenance5 required, update driver!");  // VkBufferUsageFlags2KHR, ...
-    ASSERT(m_features14.maintenance6, "Extension VK_KHR_maintenance6 required, update driver!");  // vkCmdPushConstants2KHR, vkCmdBindDescriptorSets2KHR
+    ASSERT(m_features13.maintenance4, "Extension VK_KHR_maintenance4 required, update driver!");
+    ASSERT(m_features14.maintenance5, "Extension VK_KHR_maintenance5 required, update driver!");
+    ASSERT(m_features14.maintenance6, "Extension VK_KHR_maintenance6 required, update driver!");
 
     // Get information about what the device can do
     VkPhysicalDeviceProperties2 deviceProperties{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -929,8 +993,8 @@ private:
         .pNext                   = &m_deviceFeatures,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &queueCreateInfo,
-        .enabledExtensionCount   = uint32_t(m_deviceExtensions.size()),
-        .ppEnabledExtensionNames = m_deviceExtensions.data(),
+        .enabledExtensionCount   = uint32_t(deviceExtensions.size()),
+        .ppEnabledExtensionNames = deviceExtensions.data(),
     };
     VK_CHECK(vkCreateDevice(m_physicalDevice, &deviceCreateInfo, nullptr, &m_device));
     DBG_VK_NAME(m_device);
@@ -946,7 +1010,7 @@ private:
 
     // Log the enabled extensions
     LOGI("Enabled device extensions:");
-    for(const auto& ext : m_deviceExtensions)
+    for(const auto& ext : deviceExtensions)
     {
       LOGI("  %s", ext);
     }
@@ -985,51 +1049,28 @@ private:
 
 
   // --- Members ------------------------------------------------------------------------------------------------------------
-  uint32_t m_apiVersion{0};  // The Vulkan API version
+  ContextCreateInfo m_createInfo{};   // Configuration provided during init()
+  uint32_t          m_apiVersion{0};  // The Vulkan API version
 
-  // Instance extension, extra extensions can be added here
-  std::vector<const char*> m_instanceExtensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME};
-  std::vector<const char*> m_instanceLayers     = {};  // Add extra layers here
+  // Properties: how much a feature can do
+  VkPhysicalDevicePushDescriptorProperties m_pushDescriptorProperties{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES};
 
-  // Device features, extra features can be added here
+  std::vector<VkBaseOutStructure*> m_linkedDeviceProperties{reinterpret_cast<VkBaseOutStructure*>(&m_pushDescriptorProperties)};
+
+  VkInstance                         m_instance{};        // The Vulkan instance
+  VkPhysicalDevice                   m_physicalDevice{};  // The physical device (GPU)
+  VkDevice                           m_device{};          // The logical device (interface to the physical device)
+  std::vector<QueueInfo>             m_queues;            // The queue used to submit command buffers to the GPU
+  VkDebugUtilsMessengerEXT           m_callback{VK_NULL_HANDLE};  // The debug callback
+  std::vector<VkExtensionProperties> m_instanceExtensionsAvailable;
+  std::vector<VkExtensionProperties> m_deviceExtensionsAvailable;
+
+  // Core features
   VkPhysicalDeviceFeatures2        m_deviceFeatures{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
   VkPhysicalDeviceVulkan11Features m_features11{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
   VkPhysicalDeviceVulkan12Features m_features12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
   VkPhysicalDeviceVulkan13Features m_features13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   VkPhysicalDeviceVulkan14Features m_features14{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
-  VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT m_swapchainFeatures{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT};
-  VkPhysicalDeviceExtendedDynamicStateFeaturesEXT m_dynamicStateFeatures{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
-  VkPhysicalDeviceExtendedDynamicState2FeaturesEXT m_dynamicState2Features{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
-  VkPhysicalDeviceExtendedDynamicState3FeaturesEXT m_dynamicState3Features{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
-
-  // Properties: how much a feature can do
-  VkPhysicalDevicePushDescriptorPropertiesKHR m_pushDescriptorProperties{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
-
-  std::vector<VkBaseOutStructure*> m_linkedDeviceProperties{reinterpret_cast<VkBaseOutStructure*>(&m_pushDescriptorProperties)};
-
-
-  // Device extension, extra extensions can be added here
-  std::vector<const char*> m_deviceExtensions = {
-      VK_KHR_SWAPCHAIN_EXTENSION_NAME,  // Needed for display on the screen
-  };
-
-  VkInstance                         m_instance{};        // The Vulkan instance
-  VkPhysicalDevice                   m_physicalDevice{};  // The physical device (GPU)
-  VkDevice                           m_device{};          // The logical device (interface to the physical device)
-  std::vector<QueueInfo>             m_queues{};          // The queue used to submit command buffers to the GPU
-  VkDebugUtilsMessengerEXT           m_callback{VK_NULL_HANDLE};  // The debug callback
-  std::vector<VkExtensionProperties> m_instanceExtensionsAvailable{};
-  std::vector<VkExtensionProperties> m_deviceExtensionsAvailable{};
-#ifdef NDEBUG
-  bool m_enableValidationLayers = false;
-#else
-  bool m_enableValidationLayers = true;
-#endif
 };
 
 //--- Swapchain ------------------------------------------------------------------------------------------------------------
@@ -1094,12 +1135,12 @@ public:
     VkSurfaceCapabilities2KHR             capabilities2{.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR};
     vkGetPhysicalDeviceSurfaceCapabilities2KHR(m_physicalDevice, &surfaceInfo2, &capabilities2);
 
-    uint32_t formatCount;
+    uint32_t formatCount = 0;
     vkGetPhysicalDeviceSurfaceFormats2KHR(m_physicalDevice, &surfaceInfo2, &formatCount, nullptr);
     std::vector<VkSurfaceFormat2KHR> formats(formatCount, {.sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR});
     vkGetPhysicalDeviceSurfaceFormats2KHR(m_physicalDevice, &surfaceInfo2, &formatCount, formats.data());
 
-    uint32_t presentModeCount;
+    uint32_t presentModeCount = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &presentModeCount, nullptr);
     std::vector<VkPresentModeKHR> presentModes(presentModeCount);
     vkGetPhysicalDeviceSurfacePresentModesKHR(m_physicalDevice, m_surface, &presentModeCount, presentModes.data());
@@ -1145,7 +1186,7 @@ public:
 
     // Retrieve the swapchain images
     {
-      uint32_t imageCount;
+      uint32_t imageCount = 0;
       vkGetSwapchainImagesKHR(m_device, m_swapChain, &imageCount, nullptr);
       ASSERT(m_maxFramesInFlight <= imageCount, "Wrong swapchain setup");
       m_maxFramesInFlight = imageCount;  // Use the number of images in the swapchain
@@ -1193,7 +1234,7 @@ public:
       VkCommandBuffer cmd = utils::beginSingleTimeCommands(m_device, m_cmdPool);
       for(uint32_t i = 0; i < m_maxFramesInFlight; i++)
       {
-        cmdTransitionImageLayout(cmd, m_nextImages[i].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        cmdTransitionSwapchainLayout(cmd, m_nextImages[i].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
       }
       utils::endSingleTimeCommands(cmd, m_device, m_cmdPool, m_queue.queue);
     }
@@ -1390,8 +1431,8 @@ private:
   VkSurfaceKHR     m_surface{};         // The surface to present images to
   VkCommandPool    m_cmdPool{};         // The command pool for the swapchain
 
-  std::vector<Image>          m_nextImages{};
-  std::vector<FrameResources> m_frameResources{};
+  std::vector<Image>          m_nextImages;
+  std::vector<FrameResources> m_frameResources;
   uint32_t                    m_frameResourceIndex = 0;
   uint32_t                    m_frameImageIndex    = 0;
   bool                        m_needRebuild        = false;
@@ -1617,7 +1658,7 @@ public:
     m_stagingBuffers.push_back(stagingBuffer);
 
     // Map and copy data to the staging buffer
-    void* data;
+    void* data = nullptr;
     vmaMapMemory(m_allocator, stagingBuffer.allocation, &data);
     memcpy(data, vectorData.data(), (size_t)bufferSize);
     vmaUnmapMemory(m_allocator, stagingBuffer.allocation);
@@ -1685,17 +1726,14 @@ public:
     Image image = createImage(imageInfo);
 
     // Transition image layout for copying data
-    cmdTransitionImageLayout(cmd, image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    cmdInitImageLayout(cmd, image.image);
 
     // Copy buffer data to the image
     const std::array<VkBufferImageCopy, 1> copyRegion{
         {{.imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1}, .imageExtent = imageInfo.extent}}};
 
-    vkCmdCopyBufferToImage(cmd, stagingBuffer.buffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           uint32_t(copyRegion.size()), copyRegion.data());
-
-    // Transition image layout to final layout
-    cmdTransitionImageLayout(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, finalLayout);
+    vkCmdCopyBufferToImage(cmd, stagingBuffer.buffer, image.image, VK_IMAGE_LAYOUT_GENERAL, uint32_t(copyRegion.size()),
+                           copyRegion.data());
 
     ImageResource resultImage(image);
     resultImage.layout = finalLayout;
@@ -1721,7 +1759,7 @@ public:
 private:
   VmaAllocator        m_allocator{};
   VkDevice            m_device{};
-  std::vector<Buffer> m_stagingBuffers{};
+  std::vector<Buffer> m_stagingBuffers;
   uint32_t            m_leakID = ~0U;
 };
 
@@ -1814,7 +1852,7 @@ private:
   };
 
   // Stores unique samplers with their corresponding VkSamplerCreateInfo
-  std::unordered_map<VkSamplerCreateInfo, VkSampler, SamplerCreateInfoHash, SamplerCreateInfoEqual> m_samplerMap{};
+  std::unordered_map<VkSamplerCreateInfo, VkSampler, SamplerCreateInfoHash, SamplerCreateInfoEqual> m_samplerMap;
 
   // Internal function to create a new VkSampler
   const VkSampler createSampler(const VkSamplerCreateInfo& createInfo) const
@@ -1837,7 +1875,7 @@ struct GbufferCreateInfo
   VkDevice                  device{};  // Vulkan Device
   utils::ResourceAllocator* alloc{};   // Allocator for the images
   VkExtent2D                size{};    // Width and height of the buffers
-  std::vector<VkFormat>     color{};   // Array of formats for each color attachment (as many GBuffers as formats)
+  std::vector<VkFormat>     color;     // Array of formats for each color attachment (as many GBuffers as formats)
   VkFormat              depth{VK_FORMAT_UNDEFINED};  // Format of the depth buffer (VK_FORMAT_UNDEFINED for no depth)
   VkSampler             linearSampler{};             // Linear sampler for displaying the images
   VkSampleCountFlagBits sampleCount{VK_SAMPLE_COUNT_1_BIT};  // MSAA sample count (default: no MSAA)
@@ -2005,7 +2043,7 @@ private:
     {  // Change color image layout
       for(uint32_t c = 0; c < numColor; c++)
       {
-        cmdTransitionImageLayout(cmd, m_res.gBufferColor[c].image, VK_IMAGE_LAYOUT_UNDEFINED, layout);
+        cmdInitImageLayout(cmd, m_res.gBufferColor[c].image);
         m_res.descriptor[c].imageLayout = layout;
 
         // Clear to avoid garbage data
@@ -2013,6 +2051,12 @@ private:
         const std::array<VkImageSubresourceRange, 1> range      = {
             {{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1}}};
         vkCmdClearColorImage(cmd, m_res.gBufferColor[c].image, layout, &clearValue, uint32_t(range.size()), range.data());
+      }
+
+      // Change depth image layout
+      if(m_createInfo.depth != VK_FORMAT_UNDEFINED)
+      {
+        cmdInitImageLayout(cmd, m_res.gBufferDepth.image, VK_IMAGE_ASPECT_DEPTH_BIT);
       }
     }
 
@@ -2076,17 +2120,17 @@ private:
   -*/
   struct Resources
   {
-    std::vector<utils::Image>          gBufferColor{};  // Color attachments
+    std::vector<utils::Image>          gBufferColor;    // Color attachments
     utils::Image                       gBufferDepth{};  // Optional depth attachment
     VkImageView                        depthView{};     // View for the depth attachment
-    std::vector<VkDescriptorImageInfo> descriptor{};    // Descriptor info for each color attachment
-    std::vector<VkImageView>           uiImageViews{};  // Special views for ImGui (alpha=1)
+    std::vector<VkDescriptorImageInfo> descriptor;      // Descriptor info for each color attachment
+    std::vector<VkImageView>           uiImageViews;    // Special views for ImGui (alpha=1)
   };
 
   Resources m_res;  // All Vulkan resources
 
-  GbufferCreateInfo            m_createInfo{};     // Configuration
-  std::vector<VkDescriptorSet> m_descriptorSet{};  // ImGui descriptor sets
+  GbufferCreateInfo            m_createInfo{};   // Configuration
+  std::vector<VkDescriptorSet> m_descriptorSet;  // ImGui descriptor sets
 };
 
 //--- Other helpers ------------------------------------------------------------------------------------------------------------
@@ -2268,8 +2312,22 @@ private:
   -*/
   void init()
   {
-    // Create the Vulkan context
-    m_context.init();
+    // Vulkan feature structs - allocated on the stack
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dynamicState3Features{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR unifiedImageLayoutsFeature{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR};
+
+    // Configure Vulkan context with required and optional extensions
+    utils::ContextCreateInfo contextConfig;
+
+    // Required extensions (with their feature struct pointers)
+    contextConfig.deviceExtensions.push_back({VK_KHR_SWAPCHAIN_EXTENSION_NAME, true, nullptr});
+    contextConfig.deviceExtensions.push_back({VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME, false, &unifiedImageLayoutsFeature});  // For VK_IMAGE_LAYOUT_GENERAL usage
+    contextConfig.deviceExtensions.push_back({VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, true, &dynamicState3Features});
+
+    // Create the Vulkan context with configuration
+    m_context.init(contextConfig);
 
     // Initialize the VMA allocator
     m_allocator.init(VmaAllocatorCreateInfo{
@@ -2283,7 +2341,7 @@ private:
     m_samplerPool.init(m_context.getDevice());
 
     // Create the window surface
-    glfwCreateWindowSurface(m_context.getInstance(), m_window, nullptr, reinterpret_cast<VkSurfaceKHR*>(&m_surface));
+    glfwCreateWindowSurface(m_context.getInstance(), m_window, nullptr, static_cast<VkSurfaceKHR*>(&m_surface));
     DBG_VK_NAME(m_surface);
 
 
@@ -2682,27 +2740,26 @@ private:
   void beginDynamicRenderingToSwapchain(VkCommandBuffer cmd) const
   {
     // Image to render to
-    const std::array<VkRenderingAttachmentInfoKHR, 1> colorAttachment{{{
+    const std::array<VkRenderingAttachmentInfo, 1> colorAttachment{{{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
         .imageView   = m_swapchain.getImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,   // Clear the image (see clearValue)
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,  // Store the image (keep the image)
         .clearValue  = {{{0.0f, 0.0f, 0.0f, 1.0f}}},
     }}};
 
     // Details of the dynamic rendering
-    const VkRenderingInfoKHR renderingInfo{
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR,
+    const VkRenderingInfo renderingInfo{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea           = {{0, 0}, m_windowSize},
         .layerCount           = 1,
         .colorAttachmentCount = uint32_t(colorAttachment.size()),
         .pColorAttachments    = colorAttachment.data(),
     };
 
-    // Transition the swapchain image to the color attachment layout, needed when using dynamic rendering
-    utils::cmdTransitionImageLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Transition the swapchain image to general layout for use as a render target in dynamic rendering
+    utils::cmdTransitionSwapchainLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_GENERAL);
 
     vkCmdBeginRendering(cmd, &renderingInfo);
   }
@@ -2716,8 +2773,7 @@ private:
     vkCmdEndRendering(cmd);
 
     // Transition the swapchain image back to the present layout
-    utils::cmdTransitionImageLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    utils::cmdTransitionSwapchainLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
   }
 
   /*-- 
@@ -2735,8 +2791,8 @@ private:
         .numVertex     = 3,                                // We only touch the first 3 vertex (first triangle)
     };
 
-    const VkPushConstantsInfoKHR pushInfo{
-        .sType      = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+    const VkPushConstantsInfo pushInfo{
+        .sType      = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
         .layout     = m_computePipelineLayout,  // The compute pipeline layout only includes a push constant
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         .offset     = 0,
@@ -2810,8 +2866,8 @@ private:
     }}};
 
     // Push layout information with updated data
-    const VkPushDescriptorSetInfoKHR pushDescriptorSetInfo{
-        .sType      = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO_KHR,
+    const VkPushDescriptorSetInfo pushDescriptorSetInfo{
+        .sType      = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO,
         .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
         .layout     = m_graphicPipelineLayout,
         .set        = shaderio::LSetScene,  // <--- Second set layout(set=1, binding=...) in the fragment shader
@@ -2823,9 +2879,9 @@ private:
 
 
     // Push constant information, see usage later
-    shaderio::PushConstant       pushValues{};
-    const VkPushConstantsInfoKHR pushInfo{
-        .sType      = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
+    shaderio::PushConstant    pushValues{};
+    const VkPushConstantsInfo pushInfo{
+        .sType      = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
         .layout     = m_graphicPipelineLayout,
         .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
         .offset     = 0,
@@ -2834,28 +2890,28 @@ private:
     };
 
     // Image to render to
-    const std::array<VkRenderingAttachmentInfoKHR, 1> colorAttachment{{{
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
+    const std::array<VkRenderingAttachmentInfo, 1> colorAttachment{{{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView   = m_gBuffer.getColorImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,   // Clear the image (see clearValue)
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,  // Store the image (keep the image)
         .clearValue  = {{m_clearColor}},
     }}};
 
     // Depth buffer to use
-    const VkRenderingAttachmentInfoKHR depthAttachment{
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR,
+    const VkRenderingAttachmentInfo depthAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView   = m_gBuffer.getDepthImageView(),
-        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,   // Clear depth buffer
         .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,  // Store depth buffer
         .clearValue  = {{{1.0f, 0}}},
     };
 
     // Details of the dynamic rendering
-    const VkRenderingInfoKHR renderingInfo{
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR,
+    const VkRenderingInfo renderingInfo{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea           = {{0, 0}, m_gBuffer.getSize()},
         .layerCount           = 1,
         .colorAttachmentCount = uint32_t(colorAttachment.size()),
@@ -2863,10 +2919,7 @@ private:
         .pDepthAttachment     = &depthAttachment,
     };
 
-    /*-- 
-     * Transition the swapchain image to the color attachment layout, needed when using dynamic rendering 
-     -*/
-    utils::cmdTransitionImageLayout(cmd, m_gBuffer.getColorImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    // Begin dynamic rendering
     vkCmdBeginRendering(cmd, &renderingInfo);
 
     // **Dynamic**  Defining the size of the viewport and the scissor
@@ -2878,8 +2931,8 @@ private:
      * There are two descriptor layouts, one for the texture and one for the scene information,
      * but only the texture is a set, the scene information is a push descriptor.
     -*/
-    const VkBindDescriptorSetsInfoKHR bindDescriptorSetsInfo = {
-        .sType              = VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO_KHR,
+    const VkBindDescriptorSetsInfo bindDescriptorSetsInfo = {
+        .sType              = VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO,
         .stageFlags         = VK_SHADER_STAGE_ALL_GRAPHICS,
         .layout             = m_graphicPipelineLayout,
         .firstSet           = 0,
@@ -2908,12 +2961,21 @@ private:
     vkCmdDraw(cmd, 3, 1, 3, 0);  // 3 vertices, 1 instance, 3 offset (second triangle)
 
     vkCmdEndRendering(cmd);
-    utils::cmdTransitionImageLayout(cmd, m_gBuffer.getColorImage(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
   }
 
   /*--
    * The graphic pipeline is all the stages that are used to render a section of the scene.
    * Stages like: vertex shader, fragment shader, rasterization, and blending.
+   * 
+   * This implementation uses VkPipelineCreateFlags2CreateInfoKHR (Maintenance5/Vulkan 1.4) which provides:
+   * - VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR: Allows creating faster derivative pipelines
+   * - VK_PIPELINE_CREATE_2_DERIVATIVE_BIT_KHR: Marks a pipeline as derived from a base pipeline
+   * 
+   * See other available flags for advanced use cases: 
+   * - VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR: Create pipeline libraries for fast linking
+   * - VK_PIPELINE_CREATE_2_DESCRIPTOR_BUFFER_BIT_EXT: Enable descriptor buffers
+   * - VK_PIPELINE_CREATE_2_CAPTURE_STATISTICS_BIT_KHR: Capture shader statistics
+   * - VK_PIPELINE_CREATE_2_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT: Optimize linking
   -*/
   void createGraphicsPipeline()
   {
@@ -3085,10 +3147,20 @@ private:
         .depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL,
     };
 
+    /*--
+     * Pipeline creation using VkPipelineCreateFlags2 (Maintenance5)
+     * This provides extended flags that weren't available in the original VkPipelineCreateFlags
+    -*/
+    VkPipelineCreateFlags2CreateInfoKHR createFlags2{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR,
+        .pNext = &dynamicRenderingInfo,                           // Chain the dynamic rendering info after this
+        .flags = VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR,  // Allow creating derivative pipelines for faster variants
+    };
+
     // The pipeline is created with all the information
     const VkGraphicsPipelineCreateInfo pipelineInfo = {
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &dynamicRenderingInfo,
+        .pNext               = &createFlags2,  // Use the modern flags2 structure
         .stageCount          = uint32_t(shaderStages.size()),
         .pStages             = shaderStages.data(),
         .pVertexInputState   = &vertexInputInfo,
@@ -3104,9 +3176,30 @@ private:
     VK_CHECK(vkCreateGraphicsPipelines(m_context.getDevice(), nullptr, 1, &pipelineInfo, nullptr, &m_graphicsPipelineWithTexture));
     DBG_VK_NAME(m_graphicsPipelineWithTexture);
 
-    // Create the same pipeline, this time without texture since the specialization constant will be changed
-    useTexture = VK_FALSE;
-    VK_CHECK(vkCreateGraphicsPipelines(m_context.getDevice(), nullptr, 1, &pipelineInfo, nullptr, &m_graphicsPipelineWithoutTexture));
+    /*-- 
+     * Create derivative pipeline without texture (faster than creating from scratch)
+     * Uses VK_PIPELINE_CREATE_2_DERIVATIVE_BIT_KHR to leverage the base pipeline
+    -*/
+    useTexture         = VK_FALSE;
+    createFlags2.flags = VK_PIPELINE_CREATE_2_DERIVATIVE_BIT_KHR;  // Mark as derivative
+    const VkGraphicsPipelineCreateInfo derivativePipelineInfo = {
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = &createFlags2,
+        .stageCount          = uint32_t(shaderStages.size()),
+        .pStages             = shaderStages.data(),
+        .pVertexInputState   = &vertexInputInfo,
+        .pInputAssemblyState = &inputAssemblyInfo,
+        .pRasterizationState = &rasterizerInfo,
+        .pMultisampleState   = &multisamplingInfo,
+        .pDepthStencilState  = &depthStateInfo,
+        .pColorBlendState    = &colorBlendingInfo,
+        .pDynamicState       = &dynamicStateInfo,
+        .layout              = m_graphicPipelineLayout,
+        .basePipelineHandle  = m_graphicsPipelineWithTexture,  // Derive from the textured pipeline
+        .basePipelineIndex   = -1,
+    };
+    VK_CHECK(vkCreateGraphicsPipelines(m_context.getDevice(), nullptr, 1, &derivativePipelineInfo, nullptr,
+                                       &m_graphicsPipelineWithoutTexture));
     DBG_VK_NAME(m_graphicsPipelineWithoutTexture);
 
     // Clean up the shader modules
@@ -3160,8 +3253,9 @@ private:
   -*/
   void createDescriptorPool()
   {
-    VkPhysicalDeviceProperties deviceProperties;
-    vkGetPhysicalDeviceProperties(m_context.getPhysicalDevice(), &deviceProperties);
+    VkPhysicalDeviceProperties2 deviceProperties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    vkGetPhysicalDeviceProperties2(m_context.getPhysicalDevice(), &deviceProperties2);
+    const auto& deviceProperties = deviceProperties2.properties;
 
     // This is the descriptor pool for the application textures, which is used in shaders
     {
@@ -3268,7 +3362,7 @@ private:
           {{.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS}}};
       const VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo{
           .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-          .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+          .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT,
           .bindingCount = uint32_t(layoutBindings.size()),
           .pBindings    = layoutBindings.data(),
       };
@@ -3347,7 +3441,7 @@ private:
   utils::ImageResource loadAndCreateImage(VkCommandBuffer cmd, const std::string& filename)
   {
     // Load the image from disk
-    int            w, h, comp, req_comp{4};
+    int            w = 0, h = 0, comp = 0, req_comp{4};
     const stbi_uc* data = stbi_load(filename.c_str(), &w, &h, &comp, req_comp);
     ASSERT(data != nullptr, "Could not load texture image!");
     const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -3365,9 +3459,8 @@ private:
     };
 
     // Use the VMA allocator to create the image
-    const std::span      dataSpan(data, w * h * 4);
-    utils::ImageResource image =
-        m_allocator.createImageAndUploadData(cmd, dataSpan, imageInfo, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    const std::span dataSpan(data, w * h * 4);
+    utils::ImageResource image = m_allocator.createImageAndUploadData(cmd, dataSpan, imageInfo, VK_IMAGE_LAYOUT_GENERAL);
     DBG_VK_NAME(image.image);
     image.extent = {uint32_t(w), uint32_t(h)};
 
@@ -3411,8 +3504,17 @@ private:
 #endif
     DBG_VK_NAME(compute);
 
+    /*-- 
+     * Compute pipeline creation using VkPipelineCreateFlags2 (Maintenance5) 
+    -*/
+    VkPipelineCreateFlags2CreateInfoKHR computeCreateFlags2{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR,
+        .flags = 0,  // No special flags needed for this simple compute pipeline
+    };
+
     const std::array<VkComputePipelineCreateInfo, 1> pipelineInfo{{{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .pNext = &computeCreateFlags2,  // Use the modern flags2 structure
         .stage =
             {
                 .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -3431,7 +3533,8 @@ private:
   }
 
   //--------------------------------------------------------------------------------------------------
-  GLFWwindow*              m_window{};         // The window
+  GLFWwindow* m_window{};  // The window
+
   utils::Context           m_context;          // The Vulkan context
   utils::ResourceAllocator m_allocator;        // The VMA allocator
   utils::Swapchain         m_swapchain;        // The swapchain
@@ -3466,7 +3569,7 @@ private:
     VkCommandBuffer cmdBuffer;    // Command buffer containing the frame's rendering commands
     uint64_t        frameNumber;  // Timeline value for synchronization (increases each frame)
   };
-  std::vector<FrameData> m_frameData{};    // Collection of per-frame resources to support multiple frames in flight
+  std::vector<FrameData> m_frameData;      // Collection of per-frame resources to support multiple frames in flight
   VkSemaphore m_frameTimelineSemaphore{};  // Timeline semaphore used to synchronize CPU submission with GPU completion
   uint32_t    m_frameRingCurrent{0};       // Current frame index in the ring buffer (cycles through available frames)
   utils::FramePacer m_framePacer;          // Utility to pace the frame rate
