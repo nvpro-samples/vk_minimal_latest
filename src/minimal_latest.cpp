@@ -98,10 +98,13 @@ this regular expression:
  * This is also loading all extensions and functions up to Vulkan 1.3.
  * That way we don't link statically to the Vulkan library.
 -*/
+#ifdef __APPLE__
 #define VK_ENABLE_BETA_EXTENSIONS  // Required for VK_KHR_portability_subset structures
+#endif
 #include "volk.h"
+#ifdef __APPLE__
 #include <vulkan/vulkan_beta.h>
-
+#endif
 /*--
  * We are using the Vulkan Memory Allocator (VMA) to manage memory.
  * This is a library that helps to allocate memory for Vulkan resources.
@@ -679,7 +682,7 @@ struct ExtensionConfig
 struct ContextCreateInfo
 {
   // Instance configuration
-  std::vector<const char*> instanceExtensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME};
+  std::vector<const char*> instanceExtensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME};
   std::vector<const char*> instanceLayers;
 
   // API version
@@ -742,8 +745,9 @@ public:
   VkInstance       getInstance() const { return m_instance; }
   const QueueInfo& getGraphicsQueue() const { return m_queues[0]; }
   uint32_t         getApiVersion() const { return m_apiVersion; }
+#ifdef __APPLE__
   bool             supportsImageViewFormatSwizzle() const { return m_portabilityFeatures.imageViewFormatSwizzle == VK_TRUE; }
-
+#endif
 
 private:
   //--- Vulkan Debug ------------------------------------------------------------------------------------------------------------
@@ -797,6 +801,10 @@ private:
     {
       instanceExtensions.push_back(glfwExtensions[i]);
     }
+
+    #ifdef __APPLE__
+    instanceExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    #endif
 
     // Add optional instance extensions if available
     if(extensionIsAvailable(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, m_instanceExtensionsAvailable))
@@ -978,7 +986,9 @@ private:
       }
     }
 
+    #ifdef __APPLE__
     deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    #endif
 
     // Requesting all supported features, which will then be activated in the device
     m_deviceFeatures.pNext = &m_features11;
@@ -1890,7 +1900,7 @@ struct GbufferCreateInfo
   VkFormat              depth{VK_FORMAT_UNDEFINED};  // Format of the depth buffer (VK_FORMAT_UNDEFINED for no depth)
   VkSampler             linearSampler{};             // Linear sampler for displaying the images
   VkSampleCountFlagBits sampleCount{VK_SAMPLE_COUNT_1_BIT};  // MSAA sample count (default: no MSAA)
-  bool                  imageViewFormatSwizzle{false};       // Whether device supports image view swizzle (portability)
+  bool                  imageViewFormatSwizzle{true};       // Whether device supports image view swizzle (portability)
 };
 
 /*--
@@ -2393,7 +2403,9 @@ private:
           .color                  = {VK_FORMAT_R8G8B8A8_UNORM},  // Only one GBuffer color attachment
           .depth                  = depthFormat,
           .linearSampler          = linearSampler,
+#ifdef __APPLE__
           .imageViewFormatSwizzle = m_context.supportsImageViewFormatSwizzle(),
+#endif
       };
       m_gBuffer.init(cmd, gBufferInit);
 
