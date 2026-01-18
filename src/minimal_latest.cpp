@@ -103,7 +103,7 @@ this regular expression:
 #endif
 #include "volk.h"
 #ifdef __APPLE__
-#include <vulkan/vulkan_beta.h>
+#include <vulkan/vulkan_beta.h> // More macOS portability things
 #endif
 /*--
  * We are using the Vulkan Memory Allocator (VMA) to manage memory.
