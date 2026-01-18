@@ -834,7 +834,9 @@ private:
         .ppEnabledExtensionNames = instanceExtensions.data(),
     };
 
+    #ifdef __APPLE__
     instanceCreateInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    #endif
 
     // Actual Vulkan instance creation
     VK_CHECK(vkCreateInstance(&instanceCreateInfo, nullptr, &m_instance));
@@ -949,8 +951,9 @@ private:
     pNextChainPushFront(&m_features11, &m_features12);
     pNextChainPushFront(&m_features11, &m_features13);
     pNextChainPushFront(&m_features11, &m_features14);
+    #ifdef __APPLE__
     pNextChainPushFront(&m_features11, &m_portabilityFeatures);  // MoltenVK portability subset
-
+    #endif
     /*-- 
      * Process device extensions from configuration:
      * - Check if each extension is available on the device
