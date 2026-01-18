@@ -98,7 +98,9 @@ this regular expression:
  * This is also loading all extensions and functions up to Vulkan 1.3.
  * That way we don't link statically to the Vulkan library.
 -*/
+#define VK_ENABLE_BETA_EXTENSIONS  // Required for VK_KHR_portability_subset structures
 #include "volk.h"
+#include <vulkan/vulkan_beta.h>
 
 /*--
  * We are using the Vulkan Memory Allocator (VMA) to manage memory.
@@ -677,7 +679,7 @@ struct ExtensionConfig
 struct ContextCreateInfo
 {
   // Instance configuration
-  std::vector<const char*> instanceExtensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME};
+  std::vector<const char*> instanceExtensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME};
   std::vector<const char*> instanceLayers;
 
   // API version
@@ -740,6 +742,7 @@ public:
   VkInstance       getInstance() const { return m_instance; }
   const QueueInfo& getGraphicsQueue() const { return m_queues[0]; }
   uint32_t         getApiVersion() const { return m_apiVersion; }
+  bool             supportsImageViewFormatSwizzle() const { return m_portabilityFeatures.imageViewFormatSwizzle == VK_TRUE; }
 
 
 private:
@@ -813,7 +816,7 @@ private:
     // Setting for the validation layer
     ValidationSettings validationSettings{.validate_core = VK_TRUE};  // modify default value
 
-    const VkInstanceCreateInfo instanceCreateInfo{
+    VkInstanceCreateInfo instanceCreateInfo{
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext                   = validationSettings.buildPNextChain(),
         .pApplicationInfo        = &applicationInfo,
@@ -822,6 +825,8 @@ private:
         .enabledExtensionCount   = uint32_t(instanceExtensions.size()),
         .ppEnabledExtensionNames = instanceExtensions.data(),
     };
+
+    instanceCreateInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 
     // Actual Vulkan instance creation
     VK_CHECK(vkCreateInstance(&instanceCreateInfo, nullptr, &m_instance));
@@ -936,6 +941,7 @@ private:
     pNextChainPushFront(&m_features11, &m_features12);
     pNextChainPushFront(&m_features11, &m_features13);
     pNextChainPushFront(&m_features11, &m_features14);
+    pNextChainPushFront(&m_features11, &m_portabilityFeatures);  // MoltenVK portability subset
 
     /*-- 
      * Process device extensions from configuration:
@@ -971,6 +977,8 @@ private:
         LOGW("Optional extension %s is not available, skipping", extConfig.name);
       }
     }
+
+    deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 
     // Requesting all supported features, which will then be activated in the device
     m_deviceFeatures.pNext = &m_features11;
@@ -1071,6 +1079,9 @@ private:
   VkPhysicalDeviceVulkan12Features m_features12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
   VkPhysicalDeviceVulkan13Features m_features13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
   VkPhysicalDeviceVulkan14Features m_features14{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+
+  // Portability subset features (MoltenVK/macOS)
+  VkPhysicalDevicePortabilitySubsetFeaturesKHR m_portabilityFeatures{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR};
 };
 
 //--- Swapchain ------------------------------------------------------------------------------------------------------------
@@ -1879,6 +1890,7 @@ struct GbufferCreateInfo
   VkFormat              depth{VK_FORMAT_UNDEFINED};  // Format of the depth buffer (VK_FORMAT_UNDEFINED for no depth)
   VkSampler             linearSampler{};             // Linear sampler for displaying the images
   VkSampleCountFlagBits sampleCount{VK_SAMPLE_COUNT_1_BIT};  // MSAA sample count (default: no MSAA)
+  bool                  imageViewFormatSwizzle{false};       // Whether device supports image view swizzle (portability)
 };
 
 /*--
@@ -2003,8 +2015,11 @@ private:
         vkCreateImageView(m_createInfo.device, &info, nullptr, &m_res.descriptor[c].imageView);
         dutil.setObjectName(m_res.descriptor[c].imageView, "G-Color" + std::to_string(c));
 
-        // UI Image color view
-        info.components.a = VK_COMPONENT_SWIZZLE_ONE;  // Forcing the VIEW to have a 1 in the alpha channel
+        // UI Image color view - force alpha to 1 via swizzle if supported, otherwise use identity
+        if(m_createInfo.imageViewFormatSwizzle)
+        {
+          info.components.a = VK_COMPONENT_SWIZZLE_ONE;
+        }
         vkCreateImageView(m_createInfo.device, &info, nullptr, &m_res.uiImageViews[c]);
         dutil.setObjectName(m_res.uiImageViews[c], "UI G-Color" + std::to_string(c));
       }
@@ -2372,12 +2387,13 @@ private:
 
       const VkFormat           depthFormat = utils::findDepthFormat(m_context.getPhysicalDevice());
       utils::GbufferCreateInfo gBufferInit{
-          .device        = m_context.getDevice(),
-          .alloc         = &m_allocator,
-          .size          = m_windowSize,
-          .color         = {VK_FORMAT_R8G8B8A8_UNORM},  // Only one GBuffer color attachment
-          .depth         = depthFormat,
-          .linearSampler = linearSampler,
+          .device                 = m_context.getDevice(),
+          .alloc                  = &m_allocator,
+          .size                   = m_windowSize,
+          .color                  = {VK_FORMAT_R8G8B8A8_UNORM},  // Only one GBuffer color attachment
+          .depth                  = depthFormat,
+          .linearSampler          = linearSampler,
+          .imageViewFormatSwizzle = m_context.supportsImageViewFormatSwizzle(),
       };
       m_gBuffer.init(cmd, gBufferInit);
 
