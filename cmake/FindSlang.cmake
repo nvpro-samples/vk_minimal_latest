@@ -12,7 +12,7 @@
 #
 # Creates an imported library, `Slang`, that can be linked against.
 
-set(Slang_VERSION "2025.13.1")
+set(Slang_VERSION "2026.1")
 
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ARCH_PROC)
 if(ARCH_PROC MATCHES "^(arm|aarch64)")
@@ -35,6 +35,8 @@ endif()
 
 if(WIN32)
     set(SLANG_OS "windows")
+elseif(APPLE)
+    set(SLANG_OS "macos")
 else()
     set(SLANG_OS "linux")
 endif()
