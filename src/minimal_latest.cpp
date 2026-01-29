@@ -876,6 +876,7 @@ private:
          VK_VERSION_MINOR(properties2.properties.driverVersion), VK_VERSION_PATCH(properties2.properties.driverVersion));
     LOGI("Vulkan API: %d.%d.%d", VK_VERSION_MAJOR(properties2.properties.apiVersion),
          VK_VERSION_MINOR(properties2.properties.apiVersion), VK_VERSION_PATCH(properties2.properties.apiVersion));
+    ASSERT(properties2.properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 4, 0), "Require Vulkan 1.4 device, update driver!");
   }
 
   /*--
@@ -976,11 +977,13 @@ private:
     m_deviceFeatures.pNext = &m_features11;
     vkGetPhysicalDeviceFeatures2(m_physicalDevice, &m_deviceFeatures);
 
-    // Validate core required features (from Vulkan 1.3 and 1.4)
-    ASSERT(m_features13.dynamicRendering, "Dynamic rendering required, update driver!");
-    ASSERT(m_features13.maintenance4, "Extension VK_KHR_maintenance4 required, update driver!");
-    ASSERT(m_features14.maintenance5, "Extension VK_KHR_maintenance5 required, update driver!");
-    ASSERT(m_features14.maintenance6, "Extension VK_KHR_maintenance6 required, update driver!");
+    // Validate required features - these are mandatory in Vulkan 1.4, but some drivers
+    // claim 1.4 support without full conformance. Check to catch non-conformant drivers early.
+    ASSERT(m_features12.timelineSemaphore, "Timeline semaphore required (Vulkan 1.2 core)");
+    ASSERT(m_features13.synchronization2, "Synchronization2 required (Vulkan 1.3 core)");
+    ASSERT(m_features13.dynamicRendering, "Dynamic rendering required (Vulkan 1.3 core)");
+    ASSERT(m_features14.maintenance5, "Maintenance5 required (Vulkan 1.4 core)");
+    ASSERT(m_features14.maintenance6, "Maintenance6 required (Vulkan 1.4 core)");
 
     // Get information about what the device can do
     VkPhysicalDeviceProperties2 deviceProperties{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -1289,6 +1292,9 @@ public:
     // Acquire the next image from the swapchain
     const VkResult result = vkAcquireNextImageKHR(device, m_swapChain, std::numeric_limits<uint64_t>::max(),
                                                   frame.imageAvailableSemaphore, VK_NULL_HANDLE, &m_frameImageIndex);
+#ifdef NVVK_SEMAPHORE_DEBUG
+    LOGI("AcquireNextImage: \t frameRes=%u imageIndex=%u", m_frameResourceIndex, m_frameImageIndex);
+#endif
     // Handle special case if the swapchain is out of date (e.g., window resize)
     if(result == VK_ERROR_OUT_OF_DATE_KHR)
     {
@@ -1322,6 +1328,9 @@ public:
 
     // Present the image and handle potential resizing issues
     const VkResult result = vkQueuePresentKHR(queue, &presentInfo);
+#ifdef NVVK_SEMAPHORE_DEBUG
+    LOGI("PresentFrame: \t\t frameRes=%u imageIndex=%u", m_frameResourceIndex, m_frameImageIndex);
+#endif
     // If the swapchain is out of date (e.g., window resized), it needs to be rebuilt
     if(result == VK_ERROR_OUT_OF_DATE_KHR)
     {
@@ -2505,9 +2514,9 @@ private:
     m_frameData.resize(numFrames);
 
     /*-- 
-     * Initialize timeline semaphore with (numFrames - 1) to allow concurrent frame submission. See details in README.md
+     * Initialize timeline semaphore at 0. We'll use a monotonic counter (m_frameCounter) starting at 1.
     -*/
-    const uint64_t initialValue = (numFrames - 1);
+    const uint64_t initialValue = 0;
 
     VkSemaphoreTypeCreateInfo timelineCreateInfo = {
         .sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -2535,7 +2544,7 @@ private:
 
     for(uint32_t i = 0; i < numFrames; i++)
     {
-      m_frameData[i].frameNumber = i;  // Track frame index for synchronization
+      m_frameData[i].lastSignalValue = initialValue;  // Initialize to timeline semaphore's initial value
 
       // Separate pools allow independent reset/recording of commands while other frames are still in-flight
       VK_CHECK(vkCreateCommandPool(device, &cmdPoolCreateInfo, nullptr, &m_frameData[i].cmdPool));
@@ -2671,13 +2680,13 @@ private:
 
     /*--
      * Calculate the signal value for when this frame completes
-     * Signal value = current frame number + numFramesInFlight
-     * Example with 3 frames in flight:
-     *   Frame 0 signals value 3 (allowing Frame 3 to start when complete)
-     *   Frame 1 signals value 4 (allowing Frame 4 to start when complete)
+     * Use monotonic counter that increments by 1 each frame: 1, 2, 3, 4...
     -*/
-    const uint64_t signalFrameValue = frame.frameNumber + m_swapchain.getMaxFramesInFlight();
-    frame.frameNumber               = signalFrameValue;  // Store for next time this frame buffer is used
+    const uint64_t signalFrameValue = m_frameCounter++;
+    frame.lastSignalValue           = signalFrameValue;  // Store for next time this frame buffer is used
+#ifdef NVVK_SEMAPHORE_DEBUG
+    LOGI("SubmitFrame: \t\t ring=%u signalValue=%llu", m_frameRingCurrent, static_cast<unsigned long long>(signalFrameValue));
+#endif
 
     /*-- 
      * Add timeline semaphore to signal when GPU completes this frame
@@ -2727,6 +2736,7 @@ private:
     m_viewportSize = size;
     // Recreate the G-Buffer to the size of the viewport
     vkQueueWaitIdle(m_context.getGraphicsQueue().queue);
+
     {
       VkCommandBuffer cmd = utils::beginSingleTimeCommands(m_context.getDevice(), m_transientCmdPool);
       m_gBuffer.update(cmd, m_viewportSize);
@@ -3565,16 +3575,17 @@ private:
   // Frame resources and synchronization
   struct FrameData
   {
-    VkCommandPool   cmdPool;      // Command pool for recording commands for this frame
-    VkCommandBuffer cmdBuffer;    // Command buffer containing the frame's rendering commands
-    uint64_t        frameNumber;  // Timeline value for synchronization (increases each frame)
+    VkCommandPool   cmdPool;          // Command pool for recording commands for this frame
+    VkCommandBuffer cmdBuffer;        // Command buffer containing the frame's rendering commands
+    uint64_t        lastSignalValue;  // Timeline value last signaled for this frame's resources
   };
   std::vector<FrameData> m_frameData;      // Collection of per-frame resources to support multiple frames in flight
   VkSemaphore m_frameTimelineSemaphore{};  // Timeline semaphore used to synchronize CPU submission with GPU completion
+  uint64_t    m_frameCounter{1};           // Monotonic timeline counter (increments each frame)
   uint32_t    m_frameRingCurrent{0};       // Current frame index in the ring buffer (cycles through available frames)
   utils::FramePacer m_framePacer;          // Utility to pace the frame rate
 
-  bool              m_vSync{false};                          // VSync on or off
+  bool              m_vSync{true};                           // VSync on or off
   int               m_imageID{0};                            // The current image to display
   uint32_t          m_maxTextures{10000};                    // Maximum textures allowed in the application
   VkClearColorValue m_clearColor{{0.2f, 0.2f, 0.3f, 1.0f}};  // The clear color
@@ -3587,14 +3598,14 @@ private:
   -*/
   bool prepareFrameResources()
   {
-    // Get the frame data for the current frame in the ring buffer
-    auto& frame = m_frameData[m_frameRingCurrent];
-
     // Check if swapchain needs rebuilding (this internally calls vkQueueWaitIdle())
     if(m_swapchain.needRebuilding())
     {
       m_windowSize = m_swapchain.reinitResources(m_vSync);
     }
+
+    // Get the frame data for the current frame in the ring buffer
+    auto& frame = m_frameData[m_frameRingCurrent];
 
     // Wait until GPU has finished processing the frame that was using these resources previously
     // Note: If swapchain was rebuilt above, this wait is essentially a no-op since vkQueueWaitIdle() was already called
@@ -3602,9 +3613,12 @@ private:
         .sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
         .semaphoreCount = 1,
         .pSemaphores    = &m_frameTimelineSemaphore,
-        .pValues        = &frame.frameNumber,
+        .pValues        = &frame.lastSignalValue,
     };
-    vkWaitSemaphores(m_context.getDevice(), &waitInfo, std::numeric_limits<uint64_t>::max());
+    VK_CHECK(vkWaitSemaphores(m_context.getDevice(), &waitInfo, std::numeric_limits<uint64_t>::max()));
+#ifdef NVVK_SEMAPHORE_DEBUG
+    LOGI("WaitFrame: \t\t ring=%u waitValue=%llu", m_frameRingCurrent, static_cast<unsigned long long>(frame.lastSignalValue));
+#endif
 
     VkResult result = m_swapchain.acquireNextImage(m_context.getDevice());
     return (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR);  // Continue only if we got a valid image

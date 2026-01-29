@@ -5,6 +5,8 @@ project(${MYPROJ} VERSION 1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+option(VK_SEMAPHORE_DEBUG "Enable semaphore debugging logs" OFF)
+
 # Use FetchContent for faster dependency management
 include(FetchContent)
 
@@ -20,6 +22,7 @@ include(CompilerGlslShader)
 include(DownloadPackage)
 
 # Find or download Slang compiler
+set(Slang_VERSION "2026.1")
 find_package(Slang REQUIRED)
 
 # Add the executable
@@ -28,6 +31,10 @@ add_executable(${MYPROJ}
     src/debug_util.h
     src/logger.h
     )
+
+if(VK_SEMAPHORE_DEBUG)
+  target_compile_definitions(${MYPROJ} PRIVATE NVVK_SEMAPHORE_DEBUG=1)
+endif()
 
 # Make Visual Studio using this project as the startup project
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${MYPROJ})
@@ -152,12 +159,17 @@ if(WIN32)
 endif()
 
 
-target_include_directories(${MYPROJ} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}}
-)
+target_include_directories(${MYPROJ} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Define VK_NO_PROTOTYPES to avoid including Vulkan prototypes
 # This is necessary because we are using volk to load Vulkan functions
 target_compile_definitions(${MYPROJ} PRIVATE VK_NO_PROTOTYPES)
+
+# Option to use Slang shaders instead of GLSL (default: ON)
+option(USE_SLANG "Use Slang shaders instead of GLSL" ON)
+if(USE_SLANG)
+  target_compile_definitions(${MYPROJ} PRIVATE USE_SLANG)
+endif()
 
 
 #------------------------------------------------------------------------------------------------------------------------------
