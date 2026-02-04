@@ -438,11 +438,15 @@ static VkAccessFlags2 inferAccessMaskFromStage(VkPipelineStageFlags2 stage, bool
 {
   VkAccessFlags2 access = 0;
 
-  // Handle each possible stage bit
-  if((stage & VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) != 0)
-    access |= src ? VK_ACCESS_2_SHADER_READ_BIT : VK_ACCESS_2_SHADER_WRITE_BIT;
-  if((stage & VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT) != 0)
-    access |= src ? VK_ACCESS_2_SHADER_READ_BIT : VK_ACCESS_2_SHADER_WRITE_BIT;
+  // Shader stages: default to READ|WRITE for src (to flush writes), READ for dst (to consume)
+  const bool hasCompute  = (stage & VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) != 0;
+  const bool hasFragment = (stage & VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT) != 0;
+  const bool hasVertex   = (stage & VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT) != 0;
+  if(hasCompute || hasFragment || hasVertex)
+  {
+    access |= src ? (VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT) : VK_ACCESS_2_SHADER_READ_BIT;
+  }
+
   if((stage & VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT) != 0)
     access |= VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;  // Always read-only
   if((stage & VK_PIPELINE_STAGE_2_TRANSFER_BIT) != 0)
@@ -2977,9 +2981,7 @@ private:
    * The graphic pipeline is all the stages that are used to render a section of the scene.
    * Stages like: vertex shader, fragment shader, rasterization, and blending.
    * 
-   * This implementation uses VkPipelineCreateFlags2CreateInfoKHR (Maintenance5/Vulkan 1.4) which provides:
-   * - VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR: Allows creating faster derivative pipelines
-   * - VK_PIPELINE_CREATE_2_DERIVATIVE_BIT_KHR: Marks a pipeline as derived from a base pipeline
+   * This implementation uses VkPipelineCreateFlags2CreateInfoKHR (Maintenance5/Vulkan 1.4).
    * 
    * See other available flags for advanced use cases: 
    * - VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR: Create pipeline libraries for fast linking
@@ -3157,20 +3159,10 @@ private:
         .depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL,
     };
 
-    /*--
-     * Pipeline creation using VkPipelineCreateFlags2 (Maintenance5)
-     * This provides extended flags that weren't available in the original VkPipelineCreateFlags
-    -*/
-    VkPipelineCreateFlags2CreateInfoKHR createFlags2{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR,
-        .pNext = &dynamicRenderingInfo,                           // Chain the dynamic rendering info after this
-        .flags = VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR,  // Allow creating derivative pipelines for faster variants
-    };
-
     // The pipeline is created with all the information
     const VkGraphicsPipelineCreateInfo pipelineInfo = {
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &createFlags2,  // Use the modern flags2 structure
+        .pNext               = &dynamicRenderingInfo,  // Use the modern flags2 structure
         .stageCount          = uint32_t(shaderStages.size()),
         .pStages             = shaderStages.data(),
         .pVertexInputState   = &vertexInputInfo,
@@ -3187,14 +3179,12 @@ private:
     DBG_VK_NAME(m_graphicsPipelineWithTexture);
 
     /*-- 
-     * Create derivative pipeline without texture (faster than creating from scratch)
-     * Uses VK_PIPELINE_CREATE_2_DERIVATIVE_BIT_KHR to leverage the base pipeline
+     * Create pipeline without texture
     -*/
-    useTexture         = VK_FALSE;
-    createFlags2.flags = VK_PIPELINE_CREATE_2_DERIVATIVE_BIT_KHR;  // Mark as derivative
-    const VkGraphicsPipelineCreateInfo derivativePipelineInfo = {
+    useTexture                                               = VK_FALSE;
+    const VkGraphicsPipelineCreateInfo pipelineInfoNoTexture = {
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext               = &createFlags2,
+        .pNext               = &dynamicRenderingInfo,
         .stageCount          = uint32_t(shaderStages.size()),
         .pStages             = shaderStages.data(),
         .pVertexInputState   = &vertexInputInfo,
@@ -3205,10 +3195,8 @@ private:
         .pColorBlendState    = &colorBlendingInfo,
         .pDynamicState       = &dynamicStateInfo,
         .layout              = m_graphicPipelineLayout,
-        .basePipelineHandle  = m_graphicsPipelineWithTexture,  // Derive from the textured pipeline
-        .basePipelineIndex   = -1,
     };
-    VK_CHECK(vkCreateGraphicsPipelines(m_context.getDevice(), nullptr, 1, &derivativePipelineInfo, nullptr,
+    VK_CHECK(vkCreateGraphicsPipelines(m_context.getDevice(), nullptr, 1, &pipelineInfoNoTexture, nullptr,
                                        &m_graphicsPipelineWithoutTexture));
     DBG_VK_NAME(m_graphicsPipelineWithoutTexture);
 
