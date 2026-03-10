@@ -22,7 +22,7 @@ include(CompilerGlslShader)
 include(DownloadPackage)
 
 # Find or download Slang compiler
-set(Slang_VERSION "2026.1")
+set(Slang_VERSION "2026.3.1")
 find_package(Slang REQUIRED)
 
 # Add the executable
@@ -183,7 +183,7 @@ set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_LIST_DIR}/_autogen")
 compile_slang(
   "${SHADER_SLANG_FILES}"
   "${SHADER_OUTPUT_DIR}"
-  GENERATED_SHADER_SLANG_HEADERS
+  HEADERS_VAR GENERATED_SHADER_SLANG_HEADERS
   EXTRA_FLAGS "-I${CMAKE_CURRENT_LIST_DIR}"
 )
 
