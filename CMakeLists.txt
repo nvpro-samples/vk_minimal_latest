@@ -12,6 +12,7 @@ include(FetchContent)
 
 # Find Vulkan
 find_package(Vulkan REQUIRED)
+find_package(VulkanUtilityLibraries REQUIRED)
 
 # Add cmake modules directory to module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -145,6 +146,7 @@ target_link_libraries(${MYPROJ} PRIVATE
   volk
   imgui
   glm
+  Vulkan::UtilityHeaders
 )
 
 # Link system libraries on Linux
