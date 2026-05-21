@@ -478,29 +478,20 @@ private:
     // Initializing Dear ImGui
     initImGui();
 
-    // Acquiring the sampler which will be used for displaying the RenderTarget via ImGui.
-    // Note: this is a separate VkSampler from the one stored in the descriptor heap
-    // (see createDescriptorHeap). They serve independent paths -- ImGui needs a
-    // VkSampler handle for ImGui_ImplVulkan_AddTexture; the heap path only needs a
-    // slot index and stores its sampler descriptor inside the heap buffer.
-    const VkSamplerCreateInfo info{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR};
-    const VkSampler linearSampler = m_samplerPool.acquireSampler(info);
-    DBG_VK_NAME(linearSampler);
-
     // Create the RenderTarget (offscreen color + depth)
     {
       VkCommandBuffer cmd = utils::beginSingleTimeCommands(m_context.getDevice(), m_transientCmdPool);
 
       const VkFormat                depthFormat = utils::findDepthFormat(m_context.getPhysicalDevice());
       utils::RenderTargetCreateInfo rtInit{
-          .device        = m_context.getDevice(),
-          .alloc         = &m_allocator,
-          .size          = m_windowSize,
-          .color         = {VK_FORMAT_R8G8B8A8_UNORM},  // Single color attachment
-          .depth         = depthFormat,
-          .linearSampler = linearSampler,
+          .device = m_context.getDevice(),
+          .alloc  = &m_allocator,
+          .size   = m_windowSize,
+          .color  = {VK_FORMAT_R8G8B8A8_UNORM},  // Single color attachment
+          .depth  = depthFormat,
       };
       m_renderTarget.init(cmd, rtInit);
+      m_imTexture.init(m_renderTarget.getUiImageView(0));  // ImGui texture wrapper for the RenderTarget's color image view
 
       utils::endSingleTimeCommands(cmd, m_context.getDevice(), m_transientCmdPool, m_context.getGraphicsQueue().queue);
     }
@@ -569,6 +560,7 @@ private:
 
     m_swapchain.deinit();
     m_samplerPool.deinit();
+    m_imTexture.deinit();  // Destroy the ImGui texture wrapper before shutting down ImGui itself
 
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -602,6 +594,7 @@ private:
     }
 
     m_renderTarget.deinit();
+
     m_allocator.deinit();
     m_context.deinit();
   }
@@ -720,7 +713,7 @@ private:
     if(ImGui::Begin("Viewport"))
     {
       // !!! This is where the RenderTarget image is displayed !!!
-      ImGui::Image(m_renderTarget.getImTextureID(0), ImGui::GetContentRegionAvail());
+      ImGui::Image(m_imTexture, ImGui::GetContentRegionAvail());
 
       // Adding overlay text on the upper left corner
       ImGui::SetCursorPos(ImVec2(0, 0));
@@ -864,6 +857,7 @@ private:
     {
       VkCommandBuffer cmd = utils::beginSingleTimeCommands(m_context.getDevice(), m_transientCmdPool);
       m_renderTarget.update(cmd, m_viewportSize);
+      m_imTexture.update(m_renderTarget.getUiImageView());
       utils::endSingleTimeCommands(cmd, m_context.getDevice(), m_transientCmdPool, m_context.getGraphicsQueue().queue);
     }
   }
@@ -1475,19 +1469,23 @@ private:
     vkGetPhysicalDeviceProperties2(m_context.getPhysicalDevice(), &deviceProperties2);
     const auto& deviceProperties = deviceProperties2.properties;
 
-    // ImGui allocates one descriptor set per texture (fonts, RenderTarget display, every
-    // ImGui_ImplVulkan_AddTexture, plus extras for docking/viewports). Depending on
-    // the backend configuration, those sets can use COMBINED_IMAGE_SAMPLER, or a
-    // pair of SAMPLER + SAMPLED_IMAGE -- so we provision pool slots for all three.
-    // Sizes are clamped to device limits to stay safe on minimum-spec hardware.
-    constexpr uint32_t kPreferredUiSetCount = 128;
-    const uint32_t combinedSize = std::min(kPreferredUiSetCount, deviceProperties.limits.maxDescriptorSetSampledImages);
-    const uint32_t samplerSize  = std::min(kPreferredUiSetCount, deviceProperties.limits.maxDescriptorSetSamplers);
-    const uint32_t sampledImageSize = std::min(kPreferredUiSetCount, deviceProperties.limits.maxDescriptorSetSampledImages);
-    const uint32_t maxDescriptorSets = kPreferredUiSetCount;
+    // ImGui's Vulkan backend (1.92+) uses separate SAMPLED_IMAGE + SAMPLER descriptors:
+    //   * One sampler set per built-in sampler (linear + nearest)
+    //   * One sampled-image set per texture: font atlas (which may grow dynamically),
+    //     RenderTarget display, and every ImGui_ImplVulkan_AddTexture caller.
+    // IMGUI_IMPL_VULKAN_MINIMUM_*_POOL_SIZE define the absolute floors; we pick a
+    // generous multiple so the sample has comfortable headroom for additional
+    // ImTexture instances. All sizes are clamped to device limits to stay safe on
+    // minimum-spec hardware.
+    constexpr uint32_t kUiTextureBudget = 128;  // Max simultaneous ImGui textures
+    const uint32_t     samplerSize =
+        std::min<uint32_t>(IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE, deviceProperties.limits.maxDescriptorSetSamplers);
+    const uint32_t sampledImageSize =
+        std::min<uint32_t>(std::max<uint32_t>(IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE, kUiTextureBudget),
+                           deviceProperties.limits.maxDescriptorSetSampledImages);
+    const uint32_t maxDescriptorSets = samplerSize + sampledImageSize;
 
-    const std::array<VkDescriptorPoolSize, 3> poolSizes = {{
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, combinedSize},
+    const std::array<VkDescriptorPoolSize, 2> poolSizes = {{
         {VK_DESCRIPTOR_TYPE_SAMPLER, samplerSize},
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sampledImageSize},
     }};
@@ -1501,8 +1499,7 @@ private:
 
     VK_CHECK(vkCreateDescriptorPool(m_context.getDevice(), &poolInfo, nullptr, &m_uiDescriptorPool));
     DBG_VK_NAME(m_uiDescriptorPool);
-    LOGI("Created UI descriptor pool: %u sets (combined=%u, sampler=%u, sampledImage=%u)", maxDescriptorSets,
-         combinedSize, samplerSize, sampledImageSize);
+    LOGI("Created UI descriptor pool: %u sets (sampler=%u, sampledImage=%u)", maxDescriptorSets, samplerSize, sampledImageSize);
   }
 
 
@@ -1730,6 +1727,7 @@ private:
   utils::SamplerPool   m_samplerPool;  // The sampler pool, used to create a sampler for the texture
 
   utils::RenderTarget m_renderTarget;  // Offscreen color + depth target rendered into and shown via ImGui::Image
+  utils::ImTexture    m_imTexture;     // The ImGui image wrapper for the render target's color view
 
   VkSurfaceKHR m_surface{};               // The window surface
   VkExtent2D   m_windowSize{800, 600};    // The window size

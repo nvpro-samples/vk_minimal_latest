@@ -61,7 +61,7 @@ exactly one .cpp -- see the top of `minimal_latest.cpp`.
 #include "logger.h"
 #include "debug_util.h"
 
-//--- ImGui (RenderTarget::getImTextureID / ImGui_ImplVulkan_AddTexture) --------
+//--- ImGui (utils::ImTexture / ImGui_ImplVulkan_AddTexture) --------------------
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
@@ -2078,7 +2078,6 @@ struct RenderTargetCreateInfo
   VkExtent2D                size{};    // Width and height of the buffers
   std::vector<VkFormat>     color;     // Array of formats for each color attachment (one render target per format)
   VkFormat              depth{VK_FORMAT_UNDEFINED};  // Format of the depth buffer (VK_FORMAT_UNDEFINED for no depth)
-  VkSampler             linearSampler{};             // Linear sampler for displaying the images
   VkSampleCountFlagBits sampleCount{VK_SAMPLE_COUNT_1_BIT};  // MSAA sample count (default: no MSAA)
 };
 
@@ -2092,14 +2091,16 @@ struct RenderTargetCreateInfo
  * RenderTarget - Offscreen color (one or more) + optional depth attachment.
  *
  * This is *not* a deferred-rendering G-buffer (no albedo/normal/specular split);
- * it's a generic offscreen target you render the scene into and then display
- * via ImGui::Image. Despite the multi-color-attachment support being present
- * in the API surface here, the sample only uses a single color + depth. This
- * class also supports:
+ * it's a generic offscreen target you render the scene into. The sample displays
+ * it via ImGui::Image, but the class itself is ImGui-agnostic: it exposes a
+ * dedicated alpha=1-swizzled view (getUiImageView) that callers can hand to
+ * utils::ImTexture, but it does not touch ImGui state itself.
+ *
+ * Despite the multi-color-attachment support being present in the API surface
+ * here, the sample only uses a single color + depth. This class also supports:
  * - Multiple color attachments with configurable formats (unused here)
  * - Optional depth buffer
  * - MSAA sample count (default: 1)
- * - ImGui integration for debug visualization
  * - Automatic resource cleanup
  *
  * The images are created with usage = COLOR_ATTACHMENT | SAMPLED | STORAGE |
@@ -2141,16 +2142,15 @@ public:
 
 
   //--- Getters for the RenderTarget resources --------------------
-  ImTextureID getImTextureID(uint32_t i = 0) const { return reinterpret_cast<ImTextureID>(m_descriptorSet[i]); }
-  VkExtent2D  getSize() const { return m_createInfo.size; }
-  VkImage     getColorImage(uint32_t i = 0) const { return m_res.colorImages[i].image; }
-  VkImage     getDepthImage() const { return m_res.depthImage.image; }
-  VkImageView getColorImageView(uint32_t i = 0) const { return m_res.descriptor[i].imageView; }
-  const VkDescriptorImageInfo& getDescriptorImageInfo(uint32_t i = 0) const { return m_res.descriptor[i]; }
-  VkImageView                  getDepthImageView() const { return m_res.depthView; }
-  VkFormat                     getColorFormat(uint32_t i = 0) const { return m_createInfo.color[i]; }
-  VkFormat                     getDepthFormat() const { return m_createInfo.depth; }
-  VkSampleCountFlagBits        getSampleCount() const { return m_createInfo.sampleCount; }
+  VkExtent2D            getSize() const { return m_createInfo.size; }
+  VkImage               getColorImage(uint32_t i = 0) const { return m_res.colorImages[i].image; }
+  VkImage               getDepthImage() const { return m_res.depthImage.image; }
+  VkImageView           getColorImageView(uint32_t i = 0) const { return m_res.imageViews[i]; }
+  VkImageView           getUiImageView(uint32_t i = 0) const { return m_res.uiImageViews[i]; }
+  VkImageView           getDepthImageView() const { return m_res.depthView; }
+  VkFormat              getColorFormat(uint32_t i = 0) const { return m_createInfo.color[i]; }
+  VkFormat              getDepthFormat() const { return m_createInfo.depth; }
+  VkSampleCountFlagBits getSampleCount() const { return m_createInfo.sampleCount; }
   float getAspectRatio() const { return float(m_createInfo.size.width) / float(m_createInfo.size.height); }
 
 private:
@@ -2168,7 +2168,6 @@ private:
    * - Sampled bit                : For sampling in shaders
    *
    * All images are transitioned to GENERAL layout and cleared to black.
-   * ImGui descriptors are created for debug visualization.
   -*/
   void create(VkCommandBuffer cmd)
   {
@@ -2178,9 +2177,8 @@ private:
     const auto numColor = static_cast<uint32_t>(m_createInfo.color.size());
 
     m_res.colorImages.resize(numColor);
-    m_res.descriptor.resize(numColor);
+    m_res.imageViews.resize(numColor);
     m_res.uiImageViews.resize(numColor);
-    m_descriptorSet.resize(numColor);
 
     for(uint32_t c = 0; c < numColor; c++)
     {
@@ -2208,17 +2206,16 @@ private:
             .format           = m_createInfo.color[c],
             .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1},
         };
-        VK_CHECK(vkCreateImageView(m_createInfo.device, &info, nullptr, &m_res.descriptor[c].imageView));
-        dutil.setObjectName(m_res.descriptor[c].imageView, "RT-Color" + std::to_string(c));
+
+        // Normal view
+        VK_CHECK(vkCreateImageView(m_createInfo.device, &info, nullptr, &m_res.imageViews[c]));
+        dutil.setObjectName(m_res.imageViews[c], "RT-View" + std::to_string(c));
 
         // UI Image color view
         info.components.a = VK_COMPONENT_SWIZZLE_ONE;  // Forcing the VIEW to have a 1 in the alpha channel
         VK_CHECK(vkCreateImageView(m_createInfo.device, &info, nullptr, &m_res.uiImageViews[c]));
-        dutil.setObjectName(m_res.uiImageViews[c], "UI RT-Color" + std::to_string(c));
+        dutil.setObjectName(m_res.uiImageViews[c], "UI RT-View" + std::to_string(c));
       }
-
-      // Set the sampler for the color attachment
-      m_res.descriptor[c].sampler = m_createInfo.linearSampler;
     }
 
     if(m_createInfo.depth != VK_FORMAT_UNDEFINED)
@@ -2252,8 +2249,6 @@ private:
       for(uint32_t c = 0; c < numColor; c++)
       {
         cmdInitImageLayout(cmd, m_res.colorImages[c].image);
-        m_res.descriptor[c].imageLayout = layout;
-
         // Clear to avoid garbage data
         const VkClearColorValue                      clearValue = {{0.F, 0.F, 0.F, 0.F}};
         const std::array<VkImageSubresourceRange, 1> range      = {
@@ -2267,37 +2262,16 @@ private:
         cmdInitImageLayout(cmd, m_res.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT);
       }
     }
-
-    // Descriptor Set for ImGui
-    if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
-    {
-      for(size_t d = 0; d < m_res.descriptor.size(); ++d)
-      {
-        m_descriptorSet[d] = ImGui_ImplVulkan_AddTexture(m_createInfo.linearSampler, m_res.uiImageViews[d], layout);
-      }
-    }
   }
 
   /*--
    * Clean up all Vulkan resources
-   * - Images and image views
-   * - Samplers
-   * - ImGui descriptors
    * 
    * This must be called before destroying the RenderTarget or when
    * recreating with different parameters
   -*/
   void destroy()
   {
-    if((ImGui::GetCurrentContext() != nullptr) && ImGui::GetIO().BackendPlatformUserData != nullptr)
-    {
-      for(VkDescriptorSet set : m_descriptorSet)
-      {
-        ImGui_ImplVulkan_RemoveTexture(set);
-      }
-      m_descriptorSet.clear();
-    }
-
     for(utils::Image bc : m_res.colorImages)
     {
       m_createInfo.alloc->destroyImage(bc);
@@ -2310,11 +2284,10 @@ private:
 
     vkDestroyImageView(m_createInfo.device, m_res.depthView, nullptr);
 
-    for(const VkDescriptorImageInfo& desc : m_res.descriptor)
+    for(const VkImageView& view : m_res.imageViews)
     {
-      vkDestroyImageView(m_createInfo.device, desc.imageView, nullptr);
+      vkDestroyImageView(m_createInfo.device, view, nullptr);
     }
-
     for(const VkImageView& view : m_res.uiImageViews)
     {
       vkDestroyImageView(m_createInfo.device, view, nullptr);
@@ -2328,18 +2301,84 @@ private:
   -*/
   struct Resources
   {
-    std::vector<utils::Image>          colorImages;   // Color attachments
-    utils::Image                       depthImage{};  // Optional depth attachment
-    VkImageView                        depthView{};   // View for the depth attachment
-    std::vector<VkDescriptorImageInfo> descriptor;    // Descriptor info for each color attachment
-    std::vector<VkImageView>           uiImageViews;  // Special views for ImGui (alpha=1)
+    std::vector<utils::Image> colorImages;   // Color attachments
+    utils::Image              depthImage{};  // Optional depth attachment
+    std::vector<VkImageView>  imageViews;    // Normal views for the color attachments
+    std::vector<VkImageView>  uiImageViews;  // Special views for ImGui (alpha=1)
+    VkImageView               depthView{};   // View for the depth attachment
   };
 
-  Resources m_res;  // All Vulkan resources
-
-  RenderTargetCreateInfo       m_createInfo{};   // Configuration
-  std::vector<VkDescriptorSet> m_descriptorSet;  // ImGui descriptor sets
+  Resources              m_res;           // All Vulkan resources
+  RenderTargetCreateInfo m_createInfo{};  // Configuration
 };
+
+
+//---------------------------------------------------------------------------
+// Wrapper around an ImGui (Vulkan backend) texture descriptor set.
+//
+// Internally calls ImGui_ImplVulkan_AddTexture / RemoveTexture, allocating
+// from whatever descriptor pool the ImGui Vulkan backend was initialised with
+// (typically m_uiDescriptorPool).
+//
+// Lifecycle (matches nvpro_core2 convention: explicit init/deinit, no RAII):
+//   * Default-construct freely (no Vulkan calls). Safe before ImGui init.
+//   * init(view, layout)  -- allocate the descriptor. Requires the helper to
+//                            be empty (asserts) and view to be non-null
+//                            (asserts). Must be called AFTER
+//                            ImGui_ImplVulkan_Init has run.
+//   * deinit()            -- free the descriptor if any (no-op when empty).
+//                            Must be called before the object's destructor.
+//   * update(view, layout)-- convenience shortcut equivalent to
+//                            deinit(); init(view, layout);
+//                            Use on resize.
+//   * The destructor asserts that the object has already been deinit'd.
+//   * Non-copyable and non-movable (same convention as the other resource-
+//     owning classes in this file: ownership transfers are easy to lose
+//     track of when debugging GPU lifetimes).
+//   * Single-thread (same constraint as ImGui_ImplVulkan_AddTexture).
+//---------------------------------------------------------------------------
+class ImTexture
+{
+public:
+  ImTexture() = default;
+  ~ImTexture() { assert(m_set == VK_NULL_HANDLE && "Missing deinit()"); }
+
+  ImTexture(const ImTexture&)            = delete;
+  ImTexture& operator=(const ImTexture&) = delete;
+  ImTexture(ImTexture&&)                 = delete;
+  ImTexture& operator=(ImTexture&&)      = delete;
+
+  // Allocate a descriptor set for the given view. Requires empty state and a non-null view.
+  void init(VkImageView view, VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL)
+  {
+    assert(m_set == VK_NULL_HANDLE && "Missing deinit()");
+    assert(view != VK_NULL_HANDLE && "ImTexture::init requires a valid VkImageView");
+    m_set = ImGui_ImplVulkan_AddTexture(view, layout);
+  }
+
+  // Free the descriptor set if any. No-op when empty.
+  void deinit()
+  {
+    if(m_set != VK_NULL_HANDLE)
+    {
+      ImGui_ImplVulkan_RemoveTexture(m_set);
+      m_set = VK_NULL_HANDLE;
+    }
+  }
+
+  // Convenience: deinit() + init(view, layout). Use on resize.
+  void update(VkImageView view, VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL)
+  {
+    deinit();
+    init(view, layout);
+  }
+
+  operator ImTextureRef() const { return ImTextureRef(reinterpret_cast<ImTextureID>(m_set)); }
+
+private:
+  VkDescriptorSet m_set{VK_NULL_HANDLE};
+};
+
 
 }  // namespace utils
 
