@@ -292,60 +292,46 @@ inline void cmdInitImageLayout(VkCommandBuffer cmd, VkImage image, VkImageAspect
 }
 
 /*--
- * Transition swapchain image layout for the presentation/rendering cycle:
- * - UNDEFINED -> PRESENT_SRC_KHR (swapchain initialization)
- * - PRESENT_SRC_KHR <-> GENERAL (rendering cycle)
+ * Transition swapchain image from UNDEFINED to GENERAL before dynamic rendering.
 -*/
-inline void cmdTransitionSwapchainLayout(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout)
+inline void cmdTransitionSwapchainToRenderingLayout(VkCommandBuffer cmd, VkImage image)
 {
-  VkPipelineStageFlags2 srcStage = 0, dstStage = 0;
-  VkAccessFlags2        srcAccess = 0, dstAccess = 0;
-
-  if(oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-  {
-    // Swapchain initialization
-    srcStage  = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-    srcAccess = VK_ACCESS_2_NONE;
-    dstStage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dstAccess = VK_ACCESS_2_NONE;
-  }
-  else if(oldLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && newLayout == VK_IMAGE_LAYOUT_GENERAL)
-  {
-    // Before rendering
-    srcStage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    srcAccess = VK_ACCESS_2_NONE;
-    dstStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    dstAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-  }
-  else if(oldLayout == VK_IMAGE_LAYOUT_GENERAL && newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-  {
-    // After rendering
-    srcStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-    srcAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-    dstStage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dstAccess = VK_ACCESS_2_NONE;
-  }
-  else
-  {
-    ASSERT(false, "Unsupported swapchain layout transition!");
-    srcStage = dstStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    srcAccess = dstAccess = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-  }
-
   const VkImageMemoryBarrier2 barrier{.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                                      .srcStageMask        = srcStage,
-                                      .srcAccessMask       = srcAccess,
-                                      .dstStageMask        = dstStage,
-                                      .dstAccessMask       = dstAccess,
-                                      .oldLayout           = oldLayout,
-                                      .newLayout           = newLayout,
+                                      .srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                      .srcAccessMask       = VK_ACCESS_2_NONE,
+                                      .dstStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                      .dstAccessMask       = VK_ACCESS_2_NONE,
+                                      .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+                                      .newLayout           = VK_IMAGE_LAYOUT_GENERAL,
                                       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                                       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                                       .image               = image,
                                       .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
 
   const VkDependencyInfo depInfo{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
+  vkCmdPipelineBarrier2(cmd, &depInfo);
+}
 
+/*--
+ * Transition swapchain image from GENERAL to PRESENT_SRC_KHR before present.
+-*/
+inline void cmdTransitionSwapchainToPresentLayout(VkCommandBuffer cmd, VkImage image)
+{
+  const VkImageMemoryBarrier2 barrier{.sType        = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                      .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT
+                                                      | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                      .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+                                                       | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                      .dstStageMask        = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                      .dstAccessMask       = VK_ACCESS_2_NONE,
+                                      .oldLayout           = VK_IMAGE_LAYOUT_GENERAL,
+                                      .newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                      .image               = image,
+                                      .subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+
+  const VkDependencyInfo depInfo{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
   vkCmdPipelineBarrier2(cmd, &depInfo);
 }
 
@@ -1256,16 +1242,6 @@ public:
     {
       VK_CHECK(vkCreateSemaphore(m_device, &semaphoreCreateInfo, nullptr, &m_inFlightSlots[i].acquireSemaphore));
       DBG_VK_NAME(m_inFlightSlots[i].acquireSemaphore);
-    }
-
-    // Transition images to present layout
-    {
-      VkCommandBuffer cmd = utils::beginSingleTimeCommands(m_device, m_cmdPool);
-      for(uint32_t i = 0; i < m_imageCount; i++)
-      {
-        cmdTransitionSwapchainLayout(cmd, m_nextImages[i].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-      }
-      utils::endSingleTimeCommands(cmd, m_device, m_cmdPool, m_queue.queue);
     }
 
     return outWindowSize;

@@ -889,7 +889,7 @@ private:
     };
 
     // Transition the swapchain image to general layout for use as a render target in dynamic rendering
-    utils::cmdTransitionSwapchainLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_GENERAL);
+    utils::cmdTransitionSwapchainToRenderingLayout(cmd, m_swapchain.getImage());
 
     vkCmdBeginRendering(cmd, &renderingInfo);
   }
@@ -903,7 +903,7 @@ private:
     vkCmdEndRendering(cmd);
 
     // Transition the swapchain image back to the present layout
-    utils::cmdTransitionSwapchainLayout(cmd, m_swapchain.getImage(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    utils::cmdTransitionSwapchainToPresentLayout(cmd, m_swapchain.getImage());
   }
 
   /*-- 
