@@ -557,7 +557,6 @@ inline std::string findFile(const std::string& filename, const std::vector<std::
 // Validation settings: to fine tune what is checked
 struct ValidationSettings
 {
-  VkBool32 fine_grained_locking{VK_TRUE};
   VkBool32 validate_core{VK_TRUE};
   VkBool32 check_image_layout{VK_TRUE};
   VkBool32 check_command_buffer{VK_TRUE};
@@ -584,7 +583,6 @@ struct ValidationSettings
   VkBaseInStructure* buildPNextChain()
   {
     layerSettings = std::vector<VkLayerSettingEXT>{
-        {layerName, "fine_grained_locking", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &fine_grained_locking},
         {layerName, "validate_core", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &validate_core},
         {layerName, "check_image_layout", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_image_layout},
         {layerName, "check_command_buffer", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &check_command_buffer},

@@ -22,9 +22,10 @@ include(CompilerGlslShader)
 include(DownloadPackage)
 
 # Find or download Slang compiler.
-# The version is defined in cmake/FindSlang.cmake (single source of truth);
+# The version is defined here;
 # bump it there whenever a newer Slang release is desired -- this sample is
 # intended to track the latest Vulkan and latest Slang.
+set(Slang_VERSION "2026.19" CACHE STRING "Slang version")
 find_package(Slang REQUIRED)
 
 # Add the executable
